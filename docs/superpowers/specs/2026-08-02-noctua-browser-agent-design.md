@@ -1,28 +1,29 @@
 # Noctua — Design Spec
 
 **Date:** 2026-08-02 · **Deadline:** submit by Fri 2026-08-07
-**Context:** Hiring challenge from Minerva (minerva.io — AI marketing ops for consumer brands). Build an AI agent that takes a plain-English goal and autonomously executes it in a browser, with a transparent, steerable interface. Evaluation weighs the interface, judgment/orchestration, and speed of execution. Public hosted link required.
+**Context:** Hiring challenge from Minerva Intelligence (YC X25, tryminerva.ai — AI-native accounting: CAS/bookkeeping, tax, CFO advisory for accounting firms and SMBs; evaluator is co-founder Om Agarwal). Build an AI agent that takes a plain-English goal and autonomously executes it in a browser, with a transparent, steerable interface. Evaluation weighs the interface, judgment/orchestration, and speed of execution. Public hosted link required.
 
 ## 1. Identity
 
-**Noctua** — the owl of Minerva, symbol of watchful wisdom. Tagline: *"Give Noctua a goal. Watch it fly."* The name, copy, and visual language are built for the evaluator: a submission that feels native to Minerva's brand.
+**Noctua** — the owl of Minerva, the classical symbol of watchful diligence (Minerva's own logo is an engraved Minerva head; step 02 of their "How it works" is literally titled DILIGENCE). Tagline: *"Give Noctua a chore. Watch it fly."* The name, copy, and visual language are built for the evaluator: a submission that feels native to Minerva's brand.
 
-## 2. Design language (echoing minerva.io)
+## 2. Design language (echoing tryminerva.ai)
 
 Tokens extracted from their live site:
 
 | Token | Value | Use |
 |---|---|---|
-| Klein blue | `#2941B9` | Primary accent, active states, links, reasoning highlights |
-| Deep navy | `#162174` | Primary buttons, dark chrome |
-| Ink / Paper | `#000` / `#FFF` | Text / background |
-| Grays | `rgba(0,0,0,.8/.4/.3/.2)`, `#CCC` | Secondary text, borders |
-| Green wash | `#1E4D3B` (from their data-engineer panel) | Success states |
-| Gold/ochre | `#C9A227` (from their checklist cards) | Warnings, approval-pending |
-| Deep red | `#B3261E` (added; not on their site) | Errors — chosen to stay legible in their palette |
+| Ivory | `#F1ECE6` | Page background (their exact body bg) |
+| Ink | `#171717` | Text, filled buttons (their exact ink) |
+| Muted ink | `#171717` at 30–50% opacity | Secondary text, micro-labels |
+| Sand wash | `#E3DCCB` | Section panels, hero blocks |
+| Cream card | `#FAF7F0` | Cards, panes |
+| Sage green | `#4A6B4F` | Success states (added; harmonizes with cream) |
+| Bronze | `#B08D3E` | Warnings, approval-pending (added) |
+| Oxide red | `#9C3D2E` | Errors (added) |
 
-- **Fonts:** Space Grotesk (display/UI — closest open font to their custom esSchwarzweiss), **Geist Mono** (exact match — all data, logs, metrics, URLs). Both self-hosted (no CDN).
-- **Motifs:** graph-paper grid background (thin gray lines on white); pill chips with `●` dot bullets for statuses/modes; UPPERCASE tracked micro-labels for panel headers (`AGENT REASONING`, `LIVE VIEW`, `FINDINGS`); sharp corners, 1px borders, flat cards, minimal shadow; monospace numerals for all figures; an animated dot-matrix grid as Noctua's "thinking" indicator (nod to their Agentic Data Engineer visualization); Klein-blue panel with subtle SVG-noise canvas texture on the landing hero (evokes their painterly panels without copying assets).
+- **Fonts (all exact matches, free, self-hosted — no CDN):** **Instrument Serif** (display — their exact headline font), **Geist** (UI/body — their exact body font), **Geist Mono** (data, logs, URLs, figures — sibling of Geist).
+- **Motifs:** editorial whitespace; hairline `1px` dividers in ink@10%; UPPERCASE tracked micro-labels for panel headers (`REASONING`, `LIVE VIEW`, `FINDINGS`); giant ghost serif numerals for run steps (like their "01 TALK / 02 DILIGENCE"); black `#171717` buttons with 4px radius and cream text; a line-art engraved owl medallion as Noctua's mark (evokes their Minerva-head medallion without copying it); no gradients, no shadows — flat, warm, quiet luxury.
 
 ## 3. Architecture
 
@@ -95,14 +96,14 @@ SSE event types: `run_status`, `thinking_delta`, `action_proposed` (approval mod
 
 ## 8. Results
 
-`finish` renders a deliverable-grade report: executive summary, findings table, and for funnel audits a step-by-step screenshot storyboard with annotations. Exports: Markdown, JSON, CSV. The competitive brief must look paste-into-a-deck ready.
+`finish` renders a deliverable-grade report: executive summary, findings table, and a step-by-step screenshot storyboard. Exports: Markdown, JSON, and **ledger-ready CSV** (columns an accountant can import directly). The report closes with a Minerva-style "DILIGENCE" card — ghost serif numeral, uppercase label, summary of checks performed — echoing their How-it-works section.
 
 ## 9. Showcase goals
 
 Landing screen: two preset cards + free-form goal box.
 
-- **Competitive brief:** "Brief me on [brand] — positioning, pricing, promos, social proof, ads they're running." Preset primes a brief schema (positioning, pricing table, promos, proof points, ad observations).
-- **Funnel audit:** "Walk [brand]'s signup/purchase funnel like a customer and report friction." Preset primes an audit schema (steps, friction points, screenshots, severity).
+- **Vendor due diligence (headline):** "Verify these vendors: [name + VAT/registration numbers]." Noctua validates VAT numbers on VIES (the EU's official public form — real multi-step form filling), looks companies up in public registries (e.g., UK Companies House search), visits vendor websites, and compiles a **vendor-master table**: legal name, VAT valid ✓/✗, registered address, status, source links. A real AP/month-end chore accountants dread.
+- **Compliance brief:** "Client is opening [entity type] in [jurisdiction] — compile registration steps, filing deadlines, and rates from official sources." Produces a structured compliance calendar with citations.
 
 Presets prime report schemas only — navigation stays fully agentic. Free-form box proves generality on the live call.
 
@@ -116,7 +117,7 @@ Presets prime report schemas only — navigation stays fully agentic. Free-form 
 ## 11. Testing
 
 - **Unit (vitest):** snapshot builder ref stability, budget/stuck logic, event bus replay, history summarization triggers.
-- **Integration:** full loop against a bundled fixture site (fake DTC brand: home, pricing, signup form) with a scripted fake LLM — exercises real Playwright + snapshot + events, deterministic and free.
+- **Integration:** full loop against a bundled fixture site (a mini "company registry" with a search form + company detail pages, and a small vendor website) with a scripted fake LLM — exercises real Playwright form-filling + snapshot + events, deterministic and free.
 - **E2E before submission:** real runs of both showcase goals against live brands.
 - TDD for core units per superpowers.
 
