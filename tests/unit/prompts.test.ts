@@ -76,6 +76,31 @@ describe("buildSystemPrompt — shared contract", () => {
     expect(buildSystemPrompt(preset)).toMatch(/official/i)
   })
 
+  // The run opens on about:blank, and no tool "looks at" a page — the listing arrives on its own.
+  it.each(PRESETS)("says where the run starts (%s)", (preset) => {
+    const p = buildSystemPrompt(preset)
+    expect(p).toMatch(/blank tab/i)
+    expect(p).toContain("navigate")
+  })
+
+  // "Do not post content" must not read as "do not submit the VIES form".
+  it.each(PRESETS)("separates ordinary form use from acting in the world (%s)", (preset) => {
+    const p = buildSystemPrompt(preset)
+    expect(p).toMatch(/search or lookup form/i)
+    expect(p).toMatch(/do not create accounts/i)
+  })
+
+  it.each(PRESETS)("sends an ambiguous task to the human before guessing (%s)", (preset) => {
+    expect(buildSystemPrompt(preset)).toMatch(/ambiguous[^.]*ask_human/i)
+  })
+
+  // The loop appends these alongside steering notes; unexplained, they read as page content.
+  it.each(PRESETS)("prepares the agent for stuck and budget notes (%s)", (preset) => {
+    const p = buildSystemPrompt(preset)
+    expect(p).toMatch(/stuck/i)
+    expect(p).toMatch(/budget/i)
+  })
+
   it.each(PRESETS)("makes USER STEERING binding (%s)", (preset) => {
     const p = buildSystemPrompt(preset)
     expect(p).toContain("USER STEERING:")
@@ -119,6 +144,12 @@ describe("buildSystemPrompt — vendor preset", () => {
 
   it("asks for a vendor-master table recap at the end", () => {
     expect(p).toMatch(/vendor-master table/)
+  })
+
+  // What VIES wants typed and what the row must record differ; say so, or it reads as a conflict.
+  it("keeps the typed VAT number distinct from the recorded one", () => {
+    expect(p).toMatch(/without the two-letter country prefix/)
+    expect(p).toMatch(/record .*with (its|the) prefix/i)
   })
 
   it("does not leak the compliance schema", () => {
