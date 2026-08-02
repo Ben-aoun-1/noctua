@@ -72,6 +72,14 @@ describe("tool definitions", () => {
     }
   })
 
+  it("bounds the wait so the model is told the ceiling, not just clamped at it", () => {
+    const seconds = (toolDefs.find((t) => t.name === "wait")!.input_schema.properties ?? {}) as {
+      seconds: { minimum?: number; maximum?: number }
+    }
+    expect(seconds.seconds.minimum).toBe(1)
+    expect(seconds.seconds.maximum).toBe(10)
+  })
+
   it("marks the arguments the model must always supply", () => {
     const required = Object.fromEntries(toolDefs.map((t) => [t.name, t.input_schema.required ?? []]))
     expect(required).toEqual({
@@ -118,13 +126,29 @@ describe("executeTool", () => {
     expect(await ctx.page.textContent("body")).toContain("Glowbar Ltd")
   })
 
-  it("clicks a ref and names the element it clicked", async () => {
+  it("clicks a ref, waits out the navigation it caused, and names the element", async () => {
     await executeTool("navigate", { url: fx.baseUrl + "/registry.html" }, ctx)
     const link = (await capture(ctx.page)).elements.find((e) => e.name === "Glowbar Ltd")!
 
     const out = await executeTool("click", { ref: link.ref, why: "open the company record" }, ctx)
     expect(out.summary).toBe(`clicked [${link.ref}] "Glowbar Ltd"`)
     expect(ctx.page.url()).toContain("q=Glowbar")
+    // Settled, not merely dispatched: the new document is readable the moment the tool returns.
+    expect(await ctx.page.textContent("body")).toContain("Glowbar Ltd")
+  })
+
+  it("returns promptly from a click that goes nowhere", async () => {
+    await executeTool("navigate", { url: fx.baseUrl + "/vendor.html" }, ctx)
+    const button = (await capture(ctx.page)).elements.find((e) => e.name === "Request a quote")!
+
+    const startedAt = Date.now()
+    await executeTool("click", { ref: button.ref, why: "ask for a quote" }, ctx)
+    const elapsed = Date.now() - startedAt
+
+    // The click still happened — the fixture's handler renames the page.
+    expect(await ctx.page.title()).toBe("Glowbar — Contacted")
+    // ...and cost the grace window, not the full settle timeout.
+    expect(elapsed).toBeLessThan(3000)
   })
 
   it("steps back off a destination the guard refuses", async () => {
@@ -140,7 +164,8 @@ describe("executeTool", () => {
     const link = (await capture(ctx.page)).elements.find((e) => e.name === "Glowbar Ltd")!
 
     await expect(executeTool("click", { ref: link.ref, why: "open the record" }, ctx)).rejects.toThrow(
-      /^blocked:/,
+      // The model is told where the tab ended up, so its observation matches the next screenshot.
+      `blocked: private ip 10.0.0.1; the tab was returned to ${fx.baseUrl}/registry.html`,
     )
     expect(ctx.page.url()).toBe(fx.baseUrl + "/registry.html")
   })
@@ -206,13 +231,38 @@ describe("executeTool", () => {
 
   it("scrolls the page down and back up", async () => {
     await executeTool("navigate", { url: fx.baseUrl + "/vendor.html" }, ctx)
+    const scrollY = () => ctx.page.evaluate(() => window.scrollY)
+    expect(await scrollY()).toBe(0)
+
     expect((await executeTool("scroll", { direction: "down" }, ctx)).summary).toBe("scrolled down")
+    const afterDown = await scrollY()
+    expect(afterDown).toBeGreaterThan(0)
+
     expect((await executeTool("scroll", { direction: "up" }, ctx)).summary).toBe("scrolled up")
+    expect(await scrollY()).toBeLessThan(afterDown)
   })
 
-  it("clamps a wait to the allowed range", async () => {
+  it("says the page did not move rather than claiming a scroll", async () => {
+    await executeTool("navigate", { url: fx.baseUrl + "/vendor.html" }, ctx)
+    const out = await executeTool("scroll", { direction: "up" }, ctx)
+    expect(out.summary).toBe("already at the top of the page")
+    expect(await ctx.page.evaluate(() => window.scrollY)).toBe(0)
+  })
+
+  it("clamps a wait up to the shortest allowed pause", async () => {
     const out = await executeTool("wait", { seconds: 0, reason: "page loading" }, ctx)
     expect(out.summary).toBe("waiting 1s: page loading")
+  })
+
+  it("clamps a wait down to the longest allowed pause", async () => {
+    const startedAt = Date.now()
+    const out = await executeTool("wait", { seconds: 99, reason: "slow report" }, ctx)
+    const elapsed = Date.now() - startedAt
+
+    expect(out.summary).toBe("waiting 10s: slow report")
+    // The clamp is what is being tested: 99s would blow the run's budget, 10s is the ceiling.
+    expect(elapsed).toBeGreaterThan(9_000)
+    expect(elapsed).toBeLessThan(12_000)
   })
 
   it("records findings in order and counts them", async () => {

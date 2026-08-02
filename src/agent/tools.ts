@@ -1,5 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk"
-import type { Locator, Page } from "playwright"
+import type { Frame, Locator, Page, Request } from "playwright"
 import { assertSafeUrl } from "../safety/urlGuard.js"
 
 export type FinishOutcome = "success" | "partial" | "failed"
@@ -29,17 +29,24 @@ const NAVIGATE_TIMEOUT_MS = 20_000
 const BACK_TIMEOUT_MS = 15_000
 const ACTION_TIMEOUT_MS = 10_000
 /**
- * How long an action that *might* navigate is given for that navigation to land. Playwright
- * cannot know in advance whether a click or an Enter submits, so the wait is armed before the
- * action and its timeout swallowed: actions that never navigate simply cost this much. Paying it
- * is deliberate — returning mid-navigation would have the caller screenshot a half-torn-down
- * page, or lose its execution context entirely.
+ * How long a navigation that has *started* is given to land. Waiting is the point: returning
+ * mid-navigation would have the caller screenshot a half-torn-down page, or lose its execution
+ * context entirely part-way through a snapshot.
  */
 const SETTLE_TIMEOUT_MS = 5_000
+/**
+ * How long after an action we watch for a navigation to *start*. Playwright cannot know in advance
+ * whether a click or an Enter submits, and most clicks navigate nowhere — so only actions visibly
+ * going somewhere within this window pay the settle above; the rest return at once. Browsers
+ * dispatch the navigation request within a frame or two of the click, so this is generous.
+ */
+const NAV_GRACE_MS = 600
 /** Reading an element's own text should be instant — it was located a moment ago. */
 const LABEL_TIMEOUT_MS = 2_000
 /** Roughly one viewport-ish nudge: enough to reveal new content, small enough not to skip past it. */
 const SCROLL_PIXELS = 600
+/** Long enough for a wheel event to be applied; spent in full only when the page cannot move. */
+const SCROLL_SETTLE_MS = 1_000
 const MIN_WAIT_SECONDS = 1
 const MAX_WAIT_SECONDS = 10
 /** Summaries are log lines, not transcripts — long labels and answers get cut. */
@@ -133,6 +140,8 @@ export const toolDefs: Anthropic.Tool[] = [
       properties: {
         seconds: {
           type: "integer",
+          minimum: MIN_WAIT_SECONDS,
+          maximum: MAX_WAIT_SECONDS,
           description: "How long to wait, from 1 to 10 seconds. Longer values are clamped to 10.",
         },
         reason: { type: "string", description: "One short clause on what you are waiting for." },
@@ -258,8 +267,21 @@ async function scroll(args: Record<string, unknown>, ctx: ToolCtx): Promise<Tool
   if (direction !== "up" && direction !== "down") {
     throw new Error(`scroll direction must be "up" or "down", got ${JSON.stringify(direction)}`)
   }
+  const before = await offsetY(ctx.page)
   await ctx.page.mouse.wheel(0, direction === "down" ? SCROLL_PIXELS : -SCROLL_PIXELS)
-  return { summary: `scrolled ${direction}` }
+  // A wheel event is dispatched, not applied — the page moves a frame or two later. Without this
+  // the caller screenshots the page it was already looking at. The wait times out harmlessly when
+  // there is nowhere left to scroll, which is exactly the case the summary below reports.
+  await ctx.page
+    .waitForFunction((y) => window.scrollY !== y, before, { timeout: SCROLL_SETTLE_MS })
+    .catch(() => undefined)
+  if ((await offsetY(ctx.page)) !== before) return { summary: `scrolled ${direction}` }
+  // Saying "scrolled" when nothing moved invites the model to keep scrolling a page that has ended.
+  return { summary: `already at the ${direction === "down" ? "bottom" : "top"} of the page` }
+}
+
+function offsetY(page: Page): Promise<number> {
+  return page.evaluate(() => window.scrollY)
 }
 
 async function goBack(_args: Record<string, unknown>, ctx: ToolCtx): Promise<ToolOutcome> {
@@ -347,7 +369,10 @@ async function assertLandedSafely(ctx: ToolCtx): Promise<void> {
       .goBack({ waitUntil: "domcontentloaded", timeout: BACK_TIMEOUT_MS })
       .catch(() => undefined)
     if (ctx.page.url() === blocked) await ctx.page.goto("about:blank").catch(() => undefined)
-    throw err
+    // Say where the tab ended up. The model reads this as its observation and then sees the next
+    // screenshot; without it the two disagree and it re-plans from a page it is no longer on.
+    const reason = err instanceof Error ? err.message : String(err)
+    throw new Error(`${reason}; the tab was returned to ${ctx.page.url()}`, { cause: err })
   }
 }
 
@@ -355,11 +380,21 @@ async function assertLandedSafely(ctx: ToolCtx): Promise<void> {
  * Performs an action that may or may not navigate, waits out any navigation it triggers, and
  * re-checks the destination when one happened — a link can point at a private address just as a
  * redirect can.
+ *
+ * Two waits, because "will this navigate?" is only answerable after the fact: a short grace window
+ * for a navigation to *start*, then the full settle for it to land. A click that goes nowhere —
+ * the common case — costs the grace window and nothing more.
  */
 async function actAndSettle(ctx: ToolCtx, action: () => Promise<void>): Promise<void> {
   const before = ctx.page.url()
-  // Armed before the action: a fast navigation can commit before the action's promise resolves.
-  const navigated = ctx.page
+  // Both waits are armed before the action: a fast navigation can start and even commit before the
+  // action's own promise resolves.
+  //
+  // Landing is detected by the URL changing, which misses a navigation to the *same* URL — a form
+  // posting back to itself, say. That costs the full settle and then reports no navigation; it is
+  // only a latency and re-check gap, never a wrong URL, since the address was already checked when
+  // the page was first opened.
+  const landed = ctx.page
     .waitForURL((url) => url.href !== before, {
       waitUntil: "domcontentloaded",
       timeout: SETTLE_TIMEOUT_MS,
@@ -368,8 +403,62 @@ async function actAndSettle(ctx: ToolCtx, action: () => Promise<void>): Promise<
       () => true,
       () => false,
     )
-  await action()
-  if (await navigated) await assertLandedSafely(ctx)
+  const start = watchForNavigationStart(ctx.page)
+  try {
+    await action()
+    if (!(await start.startedWithin(NAV_GRACE_MS))) return
+    await landed
+  } finally {
+    start.stop()
+  }
+  if (ctx.page.url() !== before) await assertLandedSafely(ctx)
+}
+
+interface NavigationStartWatch {
+  /** True if a main-frame navigation began within `ms` of being asked. */
+  startedWithin: (ms: number) => Promise<boolean>
+  stop: () => void
+}
+
+/**
+ * Watches for the first sign that the main frame is going somewhere. Two signals, because neither
+ * covers the other: a document navigation shows up as a navigation request well before it commits,
+ * while a History API navigation issues no request at all and only surfaces as `framenavigated`.
+ */
+function watchForNavigationStart(page: Page): NavigationStartWatch {
+  let signal!: () => void
+  const started = new Promise<void>((resolve) => {
+    signal = resolve
+  })
+  const onRequest = (request: Request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) signal()
+  }
+  const onNavigated = (frame: Frame) => {
+    if (frame === page.mainFrame()) signal()
+  }
+  page.on("request", onRequest)
+  page.on("framenavigated", onNavigated)
+
+  return {
+    startedWithin: async (ms) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([
+          started.then(() => true),
+          // Cleared in the finally, so a click that navigates never leaves this timer pending.
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), ms)
+          }),
+        ])
+      } finally {
+        clearTimeout(timer)
+      }
+    },
+    stop: () => {
+      page.off("request", onRequest)
+      page.off("framenavigated", onNavigated)
+    },
+  }
 }
 
 /**
