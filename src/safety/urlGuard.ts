@@ -13,8 +13,10 @@ PRIVATE.addSubnet("127.0.0.0", 8)      // loopback
 PRIVATE.addSubnet("169.254.0.0", 16)   // link-local, incl. cloud metadata 169.254.169.254
 PRIVATE.addSubnet("172.16.0.0", 12)    // RFC1918
 PRIVATE.addSubnet("192.168.0.0", 16)   // RFC1918
+PRIVATE.addSubnet("224.0.0.0", 4)      // multicast
 PRIVATE.addSubnet("240.0.0.0", 4)      // reserved, incl. 255.255.255.255 broadcast
 PRIVATE.addSubnet("::", 96, "ipv6")    // unspecified, loopback, IPv4-compatible ::a.b.c.d
+PRIVATE.addSubnet("64:ff9b::", 96, "ipv6") // NAT64, can encode any IPv4 incl. metadata
 PRIVATE.addSubnet("fc00::", 7, "ipv6") // unique local
 PRIVATE.addSubnet("fe80::", 10, "ipv6") // link-local
 // IPv4-mapped ::ffff:a.b.c.d is matched against the IPv4 rules above by BlockList itself.
@@ -39,5 +41,6 @@ export async function assertSafeUrl(url: string): Promise<void> {
   if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) throw new Error(`blocked: host ${host}`)
   if (isIP(host)) { if (isPrivateIp(host)) throw new Error(`blocked: private ip ${host}`); return }
   const addrs = await lookup(host, { all: true }).catch(() => { throw new Error(`blocked: cannot resolve ${host}`) })
+  if (addrs.length === 0) throw new Error(`blocked: cannot resolve ${host}`)
   for (const a of addrs) if (isPrivateIp(a.address)) throw new Error(`blocked: ${host} resolves to private ip`)
 }
