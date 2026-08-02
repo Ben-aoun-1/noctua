@@ -263,14 +263,14 @@ async function scroll(args: Record<string, unknown>, ctx: ToolCtx): Promise<Tool
 }
 
 async function goBack(_args: Record<string, unknown>, ctx: ToolCtx): Promise<ToolOutcome> {
-  const response = await ctx.page.goBack({
-    waitUntil: "domcontentloaded",
-    timeout: BACK_TIMEOUT_MS,
-  })
+  const before = ctx.page.url()
+  await ctx.page.goBack({ waitUntil: "domcontentloaded", timeout: BACK_TIMEOUT_MS })
   await assertLandedSafely(ctx)
-  // Playwright returns null when there was nothing to go back to; say so rather than claim a move.
-  if (response === null) return { summary: `no earlier page in history — still at ${ctx.page.url()}` }
-  return { summary: `went back to ${ctx.page.url()}` }
+  const after = ctx.page.url()
+  // Playwright's return value cannot answer "did we move?" — it is null both when there was no
+  // history and when the step back produced no HTTP response, as going back to a blank tab does.
+  if (after === before) return { summary: `no earlier page in history — still at ${after}` }
+  return { summary: `went back to ${after}` }
 }
 
 async function wait(args: Record<string, unknown>, ctx: ToolCtx): Promise<ToolOutcome> {
@@ -332,13 +332,21 @@ function checker(ctx: ToolCtx): (url: string) => Promise<void> {
  * for, so the check that matters is the one after the navigation, not before it.
  */
 async function assertLandedSafely(ctx: ToolCtx): Promise<void> {
+  // A blank tab is inert and is where this function's own recovery leaves the page, so checking it
+  // would flag the safe state as unsafe. Going back past the first navigation lands here too.
+  if (ctx.page.url() === "about:blank") return
   try {
     await checker(ctx)(ctx.page.url())
   } catch (err) {
-    // Step off the blocked page before failing, so no later screenshot renders its content.
+    // Step off the blocked page before failing, so no later screenshot or snapshot renders its
+    // content. Going back is preferred — it leaves the model somewhere it can carry on from — but
+    // if it did not move us (no history, or it timed out), blanking the tab is the fallback that
+    // must not be skipped: leaving the page loaded would hand the model exactly what was blocked.
+    const blocked = ctx.page.url()
     await ctx.page
       .goBack({ waitUntil: "domcontentloaded", timeout: BACK_TIMEOUT_MS })
       .catch(() => undefined)
+    if (ctx.page.url() === blocked) await ctx.page.goto("about:blank").catch(() => undefined)
     throw err
   }
 }

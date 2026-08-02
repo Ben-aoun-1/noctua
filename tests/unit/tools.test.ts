@@ -145,6 +145,49 @@ describe("executeTool", () => {
     expect(ctx.page.url()).toBe(fx.baseUrl + "/registry.html")
   })
 
+  it("leaves no blocked page loaded when the landing is refused on the first navigation", async () => {
+    // A redirect or DNS rebind on the run's very first navigation: the address passes the guard
+    // when the model asks for it, and fails once the browser has landed. Whatever the recovery
+    // does, what must not happen is the blocked page staying up for the next screenshot.
+    const fresh = await bp.page.context().newPage()
+    try {
+      let checks = 0
+      const rebinding: ToolCtx = {
+        page: fresh,
+        findings: [],
+        askHuman: async () => "",
+        checkUrl: async () => {
+          checks += 1
+          if (checks > 1) throw new Error("blocked: private ip 169.254.169.254")
+        },
+      }
+
+      await expect(
+        executeTool("navigate", { url: fx.baseUrl + "/registry.html" }, rebinding),
+      ).rejects.toThrow(/^blocked:/)
+      expect(fresh.url()).not.toContain("registry.html")
+      expect(await fresh.content()).not.toContain("Fixture Companies Registry")
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it("says so rather than claiming a move when there is nothing to go back to", async () => {
+    const fresh = await bp.page.context().newPage()
+    try {
+      const own: ToolCtx = { ...ctx, page: fresh }
+      await executeTool("navigate", { url: fx.baseUrl + "/registry.html" }, own)
+
+      // Playwright reports no response for either step; only the URL says which one moved.
+      expect((await executeTool("go_back", {}, own)).summary).toBe("went back to about:blank")
+      expect((await executeTool("go_back", {}, own)).summary).toBe(
+        "no earlier page in history — still at about:blank",
+      )
+    } finally {
+      await fresh.close()
+    }
+  })
+
   it("names a stale ref instead of timing out on a missing element", async () => {
     await executeTool("navigate", { url: fx.baseUrl + "/index.html" }, ctx)
     await expect(executeTool("click", { ref: 9999, why: "click nothing" }, ctx)).rejects.toThrow(
