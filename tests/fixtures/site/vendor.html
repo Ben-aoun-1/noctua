@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Glowbar — Vendor Home</title>
+    <style>
+      body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem; color: #111; }
+      .contact { border: 1px solid #ddd; padding: 1rem; max-width: 24rem; }
+      .invisible { visibility: hidden; }
+      .gone { display: none; }
+    </style>
+  </head>
+  <body>
+    <nav><a href="index.html">Home</a> <a href="registry.html">Registry record</a></nav>
+    <h1>Glowbar</h1>
+    <p>We make fixture-grade lighting.</p>
+
+    <div class="contact">
+      <h2>Contact</h2>
+      <p>Email: <a href="mailto:hello@glowbar.example">hello@glowbar.example</a></p>
+      <p>Phone: <a href="tel:+442000000000">+44 20 0000 0000</a></p>
+      <p>1 Fixture Way, London</p>
+      <button type="button" onclick="document.title = 'Glowbar — Contacted'">Request a quote</button>
+    </div>
+
+    <!-- Never visible, so never reachable by ref. -->
+    <button class="invisible" type="button">Hidden action</button>
+    <button class="gone" type="button">Display none action</button>
+  </body>
+</html>
