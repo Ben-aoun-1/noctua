@@ -36,6 +36,11 @@ const ACTIVE_STATUSES: readonly RunStatus[] = [
   "paused",
 ]
 
+const TERMINAL_STATUSES: readonly RunStatus[] = ["finished", "failed", "stopped"]
+
+/** Every member of `RunStatus` — a meta.json carrying anything else is not ours. */
+const ALL_STATUSES: readonly RunStatus[] = [...ACTIVE_STATUSES, ...TERMINAL_STATUSES]
+
 const PRESETS: readonly Run["preset"][] = ["vendor", "compliance", null]
 
 /**
@@ -72,12 +77,16 @@ export class RunStore {
     return this.runs.get(id)
   }
 
-  /** Live runs plus runs found on disk, newest first; a live run wins over its own meta.json. */
+  /**
+   * Live runs plus runs found on disk, newest first; a live run wins over its own meta.json.
+   * Ties on `createdAt` (same millisecond) break by id, so the order is total and does not depend
+   * on `readdir` order or on which pass inserted the entry.
+   */
   list(): RunSummary[] {
     const byId = new Map<string, RunSummary>()
     for (const meta of this.readDiskMeta()) byId.set(meta.id, meta)
     for (const run of this.runs.values()) byId.set(run.id, this.summarize(run))
-    return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt)
+    return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id))
   }
 
   /** Only in-memory runs can be active: nothing in this process is driving a run found on disk. */
@@ -131,7 +140,7 @@ export class RunStore {
       typeof m.id === "string" &&
       typeof m.goal === "string" &&
       typeof m.createdAt === "number" &&
-      typeof m.status === "string" &&
+      ALL_STATUSES.includes(m.status as RunStatus) &&
       PRESETS.includes(m.preset as Run["preset"])
     return ok ? (m as RunSummary) : null
   }

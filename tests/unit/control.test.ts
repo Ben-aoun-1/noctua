@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { RunControl } from "../../src/runs/control.js"
+import { RunControl, STOPPED_ANSWER, SUPERSEDED_ANSWER } from "../../src/runs/control.js"
 import { RunStore } from "../../src/runs/store.js"
 
 const freshDir = () => mkdtempSync(join(tmpdir(), "noctua-"))
@@ -106,14 +106,14 @@ describe("RunControl", () => {
     expect(c.isStopped()).toBe(true)
     await paused
     expect(await approval).toBe("denied")
-    expect(await answer).toContain("stopped")
+    expect(await answer).toBe(STOPPED_ANSWER)
   })
 
   it("keeps answering promptly once stopped", async () => {
     const c = new RunControl()
     c.stop()
     expect(await c.requestApproval()).toBe("denied")
-    expect(await c.askHuman()).toContain("stopped")
+    expect(await c.askHuman()).toBe(STOPPED_ANSWER)
     c.pause()
     expect(c.isPaused()).toBe(false)
     let settled = false
@@ -138,7 +138,9 @@ describe("RunControl", () => {
 
     const q1 = c.askHuman()
     const q2 = c.askHuman()
-    expect(typeof (await q1)).toBe("string")
+    // Distinguishable from a real reply, so the loop can tell the two apart.
+    expect(await q1).toBe(SUPERSEDED_ANSWER)
+    expect(SUPERSEDED_ANSWER).not.toBe(STOPPED_ANSWER)
     c.answerHuman("here you go")
     expect(await q2).toBe("here you go")
   })
@@ -196,11 +198,24 @@ describe("RunStore", () => {
     const store = new RunStore(freshDir())
     const a = store.create("first", "vendor")
     const b = store.create("second", null)
+    // Pinned rather than relying on the clock: two creates can land in the same millisecond.
+    a.createdAt = 1_000
+    b.createdAt = 2_000
     b.status = "finished"
     expect(store.list()).toEqual([
-      { id: b.id, goal: "second", preset: null, createdAt: b.createdAt, status: "finished" },
-      { id: a.id, goal: "first", preset: "vendor", createdAt: a.createdAt, status: "pending" },
+      { id: b.id, goal: "second", preset: null, createdAt: 2_000, status: "finished" },
+      { id: a.id, goal: "first", preset: "vendor", createdAt: 1_000, status: "pending" },
     ])
+  })
+
+  it("breaks createdAt ties by id so the order is total", () => {
+    const store = new RunStore(freshDir())
+    // Eight tied runs: without a tiebreak the result would follow readdir/insertion order, which
+    // matching id order by chance is a 1-in-8! event.
+    const runs = Array.from({ length: 8 }, (_, i) => store.create(`run ${i}`, null))
+    for (const run of runs) run.createdAt = 5_000
+    const ids = runs.map((r) => r.id).sort((x, y) => x.localeCompare(y))
+    expect(store.list().map((r) => r.id)).toEqual(ids)
   })
 
   it("lists finished runs discovered on disk, with in-memory state winning", () => {
@@ -226,11 +241,17 @@ describe("RunStore", () => {
     expect(first.list().find((r) => r.id === old.id)!.status).toBe("finished")
   })
 
-  it("skips run directories without a readable meta.json", () => {
+  it("skips run directories whose meta.json is missing, corrupt or not a run", () => {
     const dir = freshDir()
-    mkdirSync(join(dir, "runs", "orphan"), { recursive: true })
-    mkdirSync(join(dir, "runs", "corrupt"), { recursive: true })
-    writeFileSync(join(dir, "runs", "corrupt", "meta.json"), "{not json")
+    const write = (name: string, body: string) => {
+      mkdirSync(join(dir, "runs", name), { recursive: true })
+      writeFileSync(join(dir, "runs", name, "meta.json"), body)
+    }
+    mkdirSync(join(dir, "runs", "orphan"), { recursive: true }) // no meta.json at all
+    write("corrupt", "{not json")
+    write("bad-status", JSON.stringify({ id: "x", goal: "g", preset: null, createdAt: 1, status: "wat" }))
+    write("bad-preset", JSON.stringify({ id: "y", goal: "g", preset: "nope", createdAt: 1, status: "finished" }))
+    write("no-goal", JSON.stringify({ id: "z", preset: null, createdAt: 1, status: "finished" }))
     const store = new RunStore(dir)
     const run = store.create("only one", null)
     expect(store.list().map((r) => r.id)).toEqual([run.id])

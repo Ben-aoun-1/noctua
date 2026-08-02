@@ -1,7 +1,10 @@
 export type ApprovalDecision = "approved" | "denied"
 
 /** What `askHuman` resolves with when the run is stopped instead of answered. */
-const STOPPED_ANSWER = "(run stopped)"
+export const STOPPED_ANSWER = "(run stopped)"
+
+/** What `askHuman` resolves with when a newer question replaces an unanswered one. */
+export const SUPERSEDED_ANSWER = "(question superseded)"
 
 /**
  * The human's side of a run: pause/resume, approval gates, questions and steering notes.
@@ -73,7 +76,7 @@ export class RunControl {
 
   askHuman(): Promise<string> {
     if (this.stopped) return Promise.resolve(STOPPED_ANSWER)
-    this.answerHuman("(question superseded)")
+    this.answerHuman(SUPERSEDED_ANSWER)
     return new Promise<string>((resolve) => {
       this.humanResolve = resolve
     })
