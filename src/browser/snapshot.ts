@@ -29,7 +29,9 @@ const JPEG_QUALITY = 70
  *
  * Refs are 1-based and only valid until the next `capture` of the same page — each capture
  * clears the previous tags first, so a stale ref resolves to nothing instead of the wrong node.
- * Only the main frame is walked; elements inside iframes are not addressable.
+ * Only the main frame is walked; elements inside iframes are not addressable. Elements a click
+ * could not land on — zero-area, invisible, `disabled`, `aria-hidden="true"` — get no ref at all,
+ * so the model never spends a step on an action that would time out.
  */
 export async function capture(page: Page): Promise<Snapshot> {
   const elements = await page.evaluate(collectElements, {
@@ -112,9 +114,15 @@ function collectElements({ maxElements, maxName }: { maxElements: number; maxNam
     if (out.length >= maxElements) break
     // Skips SVG anchors and other non-HTML elements, which have no innerText to name them.
     if (!(node instanceof HTMLElement)) continue
-    // Laid-out (has boxes) and painted (not visibility:hidden) — i.e. actually clickable.
+    // Cheap "a click could plausibly land here" filter — not full Playwright actionability
+    // (no occlusion, pointer-events or ancestor aria-hidden walk). It exists so the model is
+    // never offered a ref that `page.click` would then time out on.
     if (node.getClientRects().length === 0) continue
+    const rect = node.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) continue // zero-area: nothing to click
     if (getComputedStyle(node).visibility === "hidden") continue
+    if ((node as HTMLButtonElement).disabled === true) continue
+    if (node.getAttribute("aria-hidden") === "true") continue
 
     const ref = out.length + 1
     node.setAttribute("data-noctua-ref", String(ref))

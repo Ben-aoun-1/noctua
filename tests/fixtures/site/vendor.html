@@ -8,6 +8,7 @@
       .contact { border: 1px solid #ddd; padding: 1rem; max-width: 24rem; }
       .invisible { visibility: hidden; }
       .gone { display: none; }
+      .zero { display: block; width: 0; height: 0; overflow: hidden; }
     </style>
   </head>
   <body>
@@ -23,8 +24,20 @@
       <button type="button" onclick="document.title = 'Glowbar — Contacted'">Request a quote</button>
     </div>
 
-    <!-- Never visible, so never reachable by ref. -->
+    <form class="account" action="company.html" method="get">
+      <h2>Account</h2>
+      <label for="secret">Portal password</label>
+      <input id="secret" name="secret" type="password" value="hunter2-must-not-leak" />
+      <button type="button">
+        Download the full fixture-grade lighting product catalogue for the current financial year
+      </button>
+    </form>
+
+    <!-- None of these can be clicked, so none of them may be handed a ref. -->
     <button class="invisible" type="button">Hidden action</button>
     <button class="gone" type="button">Display none action</button>
+    <a class="zero" href="index.html">Zero size link</a>
+    <button type="button" disabled>Disabled action</button>
+    <button type="button" aria-hidden="true">Aria hidden action</button>
   </body>
 </html>

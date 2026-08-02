@@ -79,6 +79,34 @@ describe("snapshot", () => {
     expect(tagged).toBe(second.elements.length)
   })
 
+  it("refuses refs for elements a click cannot land on", async () => {
+    await bp.page.goto(fx.baseUrl + "/vendor.html")
+    const snap = await capture(bp.page)
+    const named = snap.elements.map((e) => e.name)
+    expect(named).not.toContain("Zero size link") // laid out, but 0×0 — Playwright would time out
+    expect(named).not.toContain("Disabled action")
+    expect(named).not.toContain("Aria hidden action")
+    // ...while the clickable control in the same block is still offered.
+    expect(named).toContain("Request a quote")
+  })
+
+  it("truncates long names to 80 characters and never names an input from its password", async () => {
+    await bp.page.goto(fx.baseUrl + "/vendor.html")
+    const snap = await capture(bp.page)
+
+    const long = snap.elements.find((e) => e.name.startsWith("Download the full"))!
+    expect(long).toBeDefined()
+    expect(long.name).toHaveLength(80)
+    expect(long.name).toBe(
+      "Download the full fixture-grade lighting product catalogue for the current finan",
+    )
+
+    const password = snap.elements.find((e) => e.name === "secret")!
+    expect(password).toBeDefined() // named from the `name` attribute, having skipped `value`
+    expect(snapshotText(snap)).not.toContain("hunter2")
+    expect(snap.elements.every((e) => !e.name.includes("hunter2"))).toBe(true)
+  })
+
   it("follows the registry search form to the company page", async () => {
     await bp.page.goto(fx.baseUrl + "/registry.html")
     const snap = await capture(bp.page)
