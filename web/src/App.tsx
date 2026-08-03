@@ -17,7 +17,21 @@ const RUN_ROUTE = /^#\/run\/([^/?#]+)$/
 
 function readRoute(): Route {
   const match = RUN_ROUTE.exec(window.location.hash)
-  return match ? { name: "run", id: decodeURIComponent(match[1]) } : { name: "landing" }
+  return match ? { name: "run", id: decodeId(match[1]) } : { name: "landing" }
+}
+
+/**
+ * A hand-typed hash can carry a malformed escape (`%E0%A4%A`), and `decodeURIComponent` answers that
+ * with a `URIError`. Thrown from the state initialiser it would take the whole app down to a blank
+ * page, so a segment that will not decode is used exactly as it was written: the id is wrong either
+ * way, and a run screen saying so beats no screen at all.
+ */
+function decodeId(raw: string): string {
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
 }
 
 export default function App() {

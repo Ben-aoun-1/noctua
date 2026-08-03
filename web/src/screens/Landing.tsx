@@ -24,7 +24,13 @@ import OwlMark from "../components/OwlMark.tsx"
 
 const AUTH_FLAG = "noctua.authed"
 
-/** A goal still carrying `[...]` from its template is not ready to fly. */
+/**
+ * A goal still carrying `[...]` from its template is not ready to fly.
+ *
+ * Only the templated cards are held to it. Card 03 was never given brackets to replace, so there
+ * brackets are just punctuation an operator meant to write ("check the [Q3] column") and holding
+ * the launch button hostage to them would be a guard against nothing.
+ */
 const PLACEHOLDER = /\[[^\]]*\]/
 
 /** The server rejects anything longer; better to stop the keystroke than to explain a 400. */
@@ -161,14 +167,16 @@ export default function Landing() {
           <section className="mt-16 sm:mt-20">
             <p className="microlabel">PREVIOUS FLIGHTS</p>
             {runsError !== null && <p className="mt-3 text-[13px] text-oxide">{runsError}</p>}
+            {/* A failed read knows nothing about the log, so it claims nothing: the error stands
+                alone, with no "No flights yet." under it contradicting the sentence above. */}
             <div className="mt-4">
-              {runs.length === 0 ? (
-                <p className="hairline border-t py-4 text-[13px] text-ink/45">
-                  {runsLoaded ? "No flights yet." : "Reading the log…"}
-                </p>
-              ) : (
-                runs.map((run) => <FlightRow key={run.id} run={run} />)
-              )}
+              {runs.length > 0
+                ? runs.map((run) => <FlightRow key={run.id} run={run} />)
+                : runsError === null && (
+                    <p className="hairline border-t py-4 text-[13px] text-ink/45">
+                      {runsLoaded ? "No flights yet." : "Reading the log…"}
+                    </p>
+                  )}
             </div>
           </section>
         </>
@@ -239,7 +247,7 @@ function PresetPanel({ card, onExpired }: { card: PresetCard; onExpired: () => v
   const [busy, setBusy] = useState(false)
 
   const text = goal.trim()
-  const unfilled = PLACEHOLDER.test(text)
+  const unfilled = card.template !== "" && PLACEHOLDER.test(text)
   const ready = text.length > 0 && !unfilled
 
   async function launch(): Promise<void> {
