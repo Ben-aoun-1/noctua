@@ -5,10 +5,11 @@ import {
   createRun,
   listRuns,
   type Preset,
-  type RunStatus,
   type RunSummary,
 } from "../api.ts"
 import OwlMark from "../components/OwlMark.tsx"
+import StatusDot from "../components/StatusDot.tsx"
+import { messageOf } from "../format.ts"
 
 /**
  * The first screen: what Noctua is, three ways to give it a chore, and everything it has flown so
@@ -75,18 +76,6 @@ const CARDS: PresetCard[] = [
     preset: null,
   },
 ]
-
-/** How a run's state reads at a glance: settled, waiting on a human, lost, or still in the air. */
-const STATUS_DOT: Record<RunStatus, string> = {
-  finished: "bg-sage",
-  awaiting_approval: "bg-bronze",
-  awaiting_human: "bg-bronze",
-  paused: "bg-bronze",
-  failed: "bg-oxide",
-  stopped: "bg-ink/30",
-  running: "bg-ink animate-pulse",
-  pending: "bg-ink animate-pulse",
-}
 
 /** Day-month-year on a 24-hour clock: the way a ledger dates things, unambiguous everywhere. */
 const WHEN = new Intl.DateTimeFormat("en-GB", {
@@ -319,8 +308,7 @@ function FlightRow({ run }: { run: RunSummary }) {
       onClick={() => (window.location.hash = `#/run/${run.id}`)}
       title={run.goal}
     >
-      <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${STATUS_DOT[run.status]}`} />
-      <span className="sr-only">{run.status.replace("_", " ")}</span>
+      <StatusDot status={run.status} />
       <span className="mono max-w-[80ch] min-w-0 grow basis-[calc(100%_-_1.5rem)] truncate text-[13px] sm:basis-0">
         {run.goal}
       </span>
@@ -348,10 +336,4 @@ function writeAuthFlag(on: boolean): void {
   } catch {
     // ignored on purpose — the flag is a convenience, never the authority
   }
-}
-
-/** The server's sentence where there is one; whatever the network said where there is not. */
-function messageOf(err: unknown): string {
-  if (err instanceof Error && err.message.length > 0) return err.message
-  return "the server could not be reached"
 }

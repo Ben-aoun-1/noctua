@@ -1,0 +1,218 @@
+import { useEffect, useMemo, useState } from "react"
+import { ApiError, getRun, type DoneOutcome, type PersistedEvent } from "../api.ts"
+import ControlBar, { ApprovalStrip, AskStrip } from "../components/ControlBar.tsx"
+import EyesPane from "../components/EyesPane.tsx"
+import FindingsPane, { type Finding } from "../components/FindingsPane.tsx"
+import MindPane from "../components/MindPane.tsx"
+import OwlMark from "../components/OwlMark.tsx"
+import StatusDot from "../components/StatusDot.tsx"
+import { isTerminal, useRunStream } from "../useRunStream.ts"
+
+/**
+ * The run, while it is happening: what Noctua is thinking, what it is looking at, and what it has
+ * confirmed — with the controls to interrupt any of it along the bottom.
+ *
+ * Everything on this screen is derived from one array of events. There is no second source of
+ * truth and no polling: the stream replays from `seq` 1 on open, so a run watched from the first
+ * second and a run opened three days later are rendered by exactly the same code from exactly the
+ * same input. That is also what makes the receipts free — the screenshot a finding points at is an
+ * event this client already holds, so opening one costs no request at all.
+ *
+ * The one thing the events do not carry is the run's goal, which is read once from the run list.
+ */
+
+interface Digest {
+  /** Every screenshot by the step it was taken on — the receipt index. */
+  shots: Map<number, string>
+  /** The last frame to arrive, which is what the live view follows. */
+  latestShot: { step: number; url: string } | null
+  /** The last page address the log actually named, by step. */
+  addressAt: Map<number, string>
+  findings: Finding[]
+  budget: { steps: number; maxSteps: number; costUsd: number; maxCostUsd: number } | null
+  done: { outcome: DoneOutcome; summary: string } | null
+  /** An action waiting on a yes, or null. */
+  approval: { tool: string; args: Record<string, unknown> } | null
+  /** A question waiting on an answer, or null. */
+  question: string | null
+}
+
+/**
+ * The resolved address, out of the only two sentences that ever contain one.
+ *
+ * No event carries the page's URL — the screenshot event's `url` is the image's own address — so
+ * this reads it back out of the summaries `navigate` and `go_back` write, which are produced by
+ * this repository (`src/agent/tools.ts`) and are the only place a real address is stated. A click
+ * that moves the page leaves the last address standing, which is why the line under the live view
+ * is labelled as the last address seen rather than as "the current URL".
+ */
+const ADDRESS_SAID = /(?:navigated to|went back to|still at) (\S+)/
+
+export default function Cockpit({ id }: { id: string }) {
+  const { events, status, live, error } = useRunStream(id)
+  const [goal, setGoal] = useState<string | null>(null)
+  const [goalMissing, setGoalMissing] = useState(false)
+  /** The receipt currently open, shared by the findings table and the live view. */
+  const [receiptStep, setReceiptStep] = useState<number | null>(null)
+
+  const view = useMemo(() => digest(events), [events])
+
+  // Read once: a run's goal never changes, and the list is the only projection that carries it.
+  useEffect(() => {
+    let cancelled = false
+    getRun(id).then(
+      (run) => {
+        if (cancelled) return
+        if (run) setGoal(run.goal)
+        else setGoalMissing(true)
+      },
+      (err: unknown) => {
+        if (cancelled) return
+        // An expired cookie is not this screen's problem to explain: the landing page owns the
+        // gate, and it will put it back up the moment it asks for the run list itself.
+        if (err instanceof ApiError && err.status === 401) window.location.hash = "#/"
+        else setGoalMissing(true)
+      },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [id])
+
+  const over = isTerminal(status)
+  const pinned = receiptStep === null ? null : (view.shots.get(receiptStep) ?? null)
+  const shownStep = receiptStep ?? view.latestShot?.step ?? null
+  const shownUrl = receiptStep === null ? (view.latestShot?.url ?? null) : pinned
+
+  return (
+    <div className="flex min-h-screen flex-col lg:h-screen lg:overflow-hidden">
+      <header className="hairline shrink-0 border-b px-5 py-3 sm:px-8">
+        <div className="mx-auto flex w-full max-w-[1600px] items-center gap-4">
+          <a href="#/" aria-label="Back to the landing page" className="shrink-0 hover:opacity-70">
+            <OwlMark size={26} />
+          </a>
+          <h1
+            className="serif min-w-0 flex-1 truncate text-[17px] leading-tight sm:text-[20px]"
+            title={goal ?? undefined}
+          >
+            {goal ?? (goalMissing ? "This run is not on this deployment." : "…")}
+          </h1>
+          <span className="chip shrink-0">
+            <StatusDot status={status} />
+            <span aria-hidden>{status.replace("_", " ")}</span>
+          </span>
+          <a className="microlabel shrink-0 hover:text-ink max-sm:hidden" href="#/">
+            ← ALL FLIGHTS
+          </a>
+        </div>
+        {(error !== null || (!live && !over)) && (
+          <p className={`microlabel mx-auto mt-1 w-full max-w-[1600px] ${error ? "text-oxide" : ""}`}>
+            {error ?? "RECONNECTING…"}
+          </p>
+        )}
+      </header>
+
+      <main className="mx-auto grid w-full max-w-[1600px] grow gap-4 px-5 py-4 sm:px-8 lg:min-h-0 lg:grid-cols-[minmax(280px,1fr)_minmax(400px,1.4fr)_minmax(300px,1fr)] lg:overflow-hidden">
+        <MindPane events={events} />
+        <EyesPane
+          url={shownUrl}
+          step={shownStep}
+          pageUrl={shownStep === null ? "" : (view.addressAt.get(shownStep) ?? "")}
+          waiting={!over && receiptStep === null}
+          receiptStep={receiptStep}
+          onLive={() => setReceiptStep(null)}
+        />
+        <FindingsPane
+          runId={id}
+          findings={view.findings}
+          done={view.done}
+          openStep={receiptStep}
+          onToggleReceipt={(step) => setReceiptStep((open) => (open === step ? null : step))}
+          shotFor={(step) => view.shots.get(step) ?? null}
+        />
+      </main>
+
+      <footer className="sticky bottom-0 z-10 shrink-0">
+        {view.approval && (
+          <ApprovalStrip runId={id} tool={view.approval.tool} args={view.approval.args} />
+        )}
+        {view.question !== null && <AskStrip runId={id} question={view.question} />}
+        <ControlBar runId={id} status={status} budget={view.budget} />
+      </footer>
+    </div>
+  )
+}
+
+/**
+ * Everything the three panes need, in one pass over the log.
+ *
+ * The two "is something waiting on me?" questions are answered from the events rather than from the
+ * status, because a proposal can be settled in more than one way. An approval that is *denied*
+ * produces no `action_started` and no `action_result` at all — the loop simply takes another turn,
+ * whose first act is a screenshot. So a proposal is outstanding until an action, a frame, or the
+ * end of the run happens after it, and any of those three is enough to take the strip down.
+ */
+function digest(events: PersistedEvent[]): Digest {
+  const shots = new Map<number, string>()
+  const addressAt = new Map<number, string>()
+  const findings: Finding[] = []
+  let latestShot: Digest["latestShot"] = null
+  let budget: Digest["budget"] = null
+  let done: Digest["done"] = null
+  let approval: Digest["approval"] = null
+  let question: string | null = null
+  let address = ""
+
+  for (const { event } of events) {
+    switch (event.type) {
+      case "screenshot":
+        shots.set(event.step, event.url)
+        addressAt.set(event.step, address)
+        latestShot = { step: event.step, url: event.url }
+        // A new turn has begun: nothing proposed before it is still waiting on this human.
+        approval = null
+        break
+      case "finding":
+        findings.push({ data: event.data, step: event.step })
+        break
+      case "budget":
+        budget = event
+        break
+      case "done":
+        done = { outcome: event.outcome, summary: event.summary }
+        approval = null
+        question = null
+        break
+      case "action_proposed":
+        approval = { tool: event.tool, args: event.args }
+        break
+      case "action_started":
+        approval = null
+        if (event.tool === "navigate" && typeof event.args.url === "string") address = event.args.url
+        break
+      case "action_result": {
+        approval = null
+        const said = event.ok ? ADDRESS_SAID.exec(event.summary) : null
+        if (said) address = said[1]
+        break
+      }
+      case "ask_human":
+        question = event.question
+        break
+      case "human_answer":
+        question = null
+        break
+      case "run_status":
+        // A run that ended without saying goodbye still takes its strips down with it.
+        if (isTerminal(event.status)) {
+          approval = null
+          question = null
+        }
+        break
+      default:
+        break
+    }
+  }
+
+  return { shots, latestShot, addressAt, findings, budget, done, approval, question }
+}

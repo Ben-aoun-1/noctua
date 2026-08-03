@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import OwlMark from "./components/OwlMark.tsx"
+import Cockpit from "./screens/Cockpit.tsx"
 import Landing from "./screens/Landing.tsx"
 
 /**
@@ -43,21 +43,7 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHashChange)
   }, [])
 
-  return route.name === "run" ? <CockpitStub id={route.id} /> : <Landing />
-}
-
-/** Task 14 replaces this with the live cockpit; the route exists now so the landing page can use it. */
-function CockpitStub({ id }: { id: string }) {
-  return (
-    <main className="mx-auto flex min-h-screen w-full max-w-[1080px] flex-col items-center justify-center gap-6 px-6 py-16 text-center">
-      <OwlMark size={48} />
-      <p className="microlabel">COCKPIT</p>
-      <p className="mono max-w-full text-[13px] break-words">
-        Run {id} — cockpit lands in the next task
-      </p>
-      <a className="btn-outline mt-2" href="#/">
-        Back to landing
-      </a>
-    </main>
-  )
+  // Keyed on the id: a jump from one run to another must build a fresh cockpit rather than hand
+  // the new id to a component still holding the previous run's stream, findings and open receipt.
+  return route.name === "run" ? <Cockpit key={route.id} id={route.id} /> : <Landing />
 }

@@ -35,6 +35,52 @@ export interface RunSummary {
   costUsd: number
 }
 
+/**
+ * Everything a run says about itself, mirroring `src/events/types.ts` field for field.
+ *
+ * Hand-written rather than shared: the UI is built by Vite out of `web/`, the server by tsc out of
+ * `src/`, and reaching across that line for a type would drag the server's module graph into the
+ * bundle. The cost is that a rename on one side has to be made on the other, which is why the two
+ * are kept literally identical rather than "equivalent" — every field name here is the wire name.
+ */
+export type AgentEvent =
+  | { type: "run_status"; status: RunStatus }
+  | { type: "thinking_delta"; text: string }
+  | { type: "action_proposed"; tool: string; args: Record<string, unknown>; guarded: boolean }
+  | { type: "action_started"; tool: string; args: Record<string, unknown> }
+  | { type: "action_result"; tool: string; ok: boolean; summary: string }
+  | { type: "screenshot"; url: string; step: number }
+  | { type: "finding"; data: Record<string, unknown>; step: number }
+  | { type: "ask_human"; question: string }
+  | { type: "human_answer"; text: string }
+  | { type: "steer"; text: string }
+  | { type: "budget"; steps: number; maxSteps: number; costUsd: number; maxCostUsd: number }
+  | { type: "error"; message: string; recoverable: boolean }
+  | { type: "done"; outcome: DoneOutcome; summary: string }
+
+export type DoneOutcome = "success" | "partial" | "failed" | "stopped"
+
+/** One line of a run's log: `seq` is 1-based, gap-free, and doubles as the SSE event id. */
+export interface PersistedEvent {
+  seq: number
+  ts: number
+  event: AgentEvent
+}
+
+/** How much rope the agent is given: `auto` acts, `approve` asks before every single action. */
+export type RunMode = "auto" | "approve"
+
+/** The eight things a watching human can do to a run in flight. */
+export interface ControlBody {
+  action: "pause" | "resume" | "stop" | "mode" | "approve" | "deny" | "steer" | "answer"
+  /** Required by `mode`, ignored otherwise. */
+  mode?: RunMode
+  /** Required by `steer` and `answer`, ignored otherwise. */
+  text?: string
+}
+
+export type ExportFormat = "md" | "json" | "csv"
+
 /** A non-2xx answer, carrying the server's message and the status the caller may want to branch on. */
 export class ApiError extends Error {
   status: number
@@ -59,6 +105,39 @@ export async function createRun(goal: string, preset: Preset): Promise<{ id: str
 /** Every run this deployment remembers, live or finished, newest first. */
 export async function listRuns(): Promise<RunSummary[]> {
   return request<RunSummary[]>("/api/runs")
+}
+
+/**
+ * One run, or null when this deployment has never heard of it.
+ *
+ * There is no `GET /api/runs/:id`: the list is the only projection the server offers, and it
+ * already carries every field the cockpit's header needs. A run found on disk lists the same as a
+ * live one, so a link to yesterday's flight still resolves to its goal.
+ */
+export async function getRun(id: string): Promise<RunSummary | null> {
+  const runs = await listRuns()
+  return runs.find((run) => run.id === id) ?? null
+}
+
+/** Pause, resume, stop, switch modes, settle an approval, steer, or answer a question. */
+export async function controlRun(id: string, body: ControlBody): Promise<void> {
+  await send<{ ok: true }>(`/api/runs/${encodeURIComponent(id)}/control`, body)
+}
+
+/**
+ * The SSE endpoint for a run, from `from` onwards.
+ *
+ * A URL rather than a fetch: `EventSource` opens the connection itself, and reconnects itself —
+ * quoting the last id it saw in `Last-Event-ID`, which the server prefers over this `from`. So the
+ * one seq in this string is only ever the *first* connection's starting point.
+ */
+export function eventsUrl(id: string, from = 1): string {
+  return `/api/runs/${encodeURIComponent(id)}/events?from=${from}`
+}
+
+/** A run's report as something to keep. Used as an `href`, so it carries the cookie on its own. */
+export function exportUrl(id: string, format: ExportFormat): string {
+  return `/api/runs/${encodeURIComponent(id)}/export?format=${format}`
 }
 
 async function send<T>(path: string, body: unknown): Promise<T> {
