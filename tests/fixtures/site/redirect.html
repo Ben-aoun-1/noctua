@@ -13,8 +13,9 @@
     <script>
       // The whole point of this fixture: the hop happens long after `navigate` returned and its
       // landing check passed, which is the gap the loop's capture-time re-check has to close.
-      // 1.5s is comfortably longer than a capture takes, so the redirect never lands mid-snapshot.
-      setTimeout(function () { location.href = "offsite.html" }, 1500)
+      // 2.5s is many times longer than the capture that follows the navigation, so the redirect
+      // lands between two turns rather than mid-snapshot however loaded the machine is.
+      setTimeout(function () { location.href = "offsite.html" }, 2500)
     </script>
   </body>
 </html>

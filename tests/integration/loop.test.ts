@@ -132,7 +132,7 @@ function decideOn(run: Run, ...decisions: ApprovalDecision[]): void {
   })
 }
 
-/** Runs `fn` the first time an event of `type` is appended, synchronously. */
+/** Runs `fn` synchronously inside the append of every event of `type`. */
 function on(run: Run, type: AgentEvent["type"], fn: (e: AgentEvent) => void): void {
   run.log.subscribe(1, (pe) => {
     if (pe.event.type === type) fn(pe.event)
@@ -479,7 +479,7 @@ describe("the agent loop — when things go wrong", () => {
       [
         { toolName: "navigate", toolInput: { url: `${fx.baseUrl}/redirect.html` } },
         // The hop fires during this wait — after navigate's own landing check already passed.
-        { toolName: "wait", toolInput: { seconds: 2, reason: "the page is still settling" } },
+        { toolName: "wait", toolInput: { seconds: 4, reason: "the page is still settling" } },
         { toolName: "finish", toolInput: { outcome: "partial", summary: "It redirected away." } },
       ],
       () => {},
