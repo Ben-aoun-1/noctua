@@ -18,13 +18,17 @@ export interface Run {
   findings: Record<string, unknown>[]
 }
 
-/** The listable projection of a run — everything the landing page needs, nothing live. */
+/**
+ * The listable projection of a run — everything the landing page needs, nothing live. It is also
+ * exactly what `meta.json` holds, so a run this process never saw lists the same as a live one.
+ */
 export interface RunSummary {
   id: string
   goal: string
   preset: Run["preset"]
   createdAt: number
   status: RunStatus
+  costUsd: number
 }
 
 /** Statuses that mean a loop is still driving the run (concurrency cap counts these). */
@@ -42,6 +46,28 @@ const TERMINAL_STATUSES: readonly RunStatus[] = ["finished", "failed", "stopped"
 const ALL_STATUSES: readonly RunStatus[] = [...ACTIVE_STATUSES, ...TERMINAL_STATUSES]
 
 const PRESETS: readonly Run["preset"][] = ["vendor", "compliance", null]
+
+function summarize(run: Run): RunSummary {
+  return {
+    id: run.id,
+    goal: run.goal,
+    preset: run.preset,
+    createdAt: run.createdAt,
+    status: run.status,
+    costUsd: run.costUsd,
+  }
+}
+
+/**
+ * Rewrites this run's `meta.json`.
+ *
+ * The agent loop calls it on every status change and after every budget update, because meta.json
+ * is all a restarted process has: without it yesterday's finished runs list as `pending` for ever,
+ * and the daily cost cap starts each restart with a fresh allowance it has already spent.
+ */
+export function persistRun(run: Run): void {
+  writeFileSync(join(run.log.dir, "meta.json"), JSON.stringify(summarize(run)))
+}
 
 /**
  * In-memory registry of runs for this process, backed by one `meta.json` per run directory so
@@ -69,7 +95,7 @@ export class RunStore {
       findings: [],
     }
     this.runs.set(id, run)
-    writeFileSync(join(run.log.dir, "meta.json"), JSON.stringify(this.summarize(run)))
+    persistRun(run)
     return run
   }
 
@@ -85,7 +111,7 @@ export class RunStore {
   list(): RunSummary[] {
     const byId = new Map<string, RunSummary>()
     for (const meta of this.readDiskMeta()) byId.set(meta.id, meta)
-    for (const run of this.runs.values()) byId.set(run.id, this.summarize(run))
+    for (const run of this.runs.values()) byId.set(run.id, summarize(run))
     return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id))
   }
 
@@ -96,24 +122,18 @@ export class RunStore {
     return n
   }
 
-  /** Spend since local midnight, in-memory only — `meta.json` does not carry cost. */
+  /**
+   * Spend since local midnight, across runs on disk as well as live ones — the cap is a daily
+   * one, so a restart must not hand the day a fresh allowance it has already spent. `list()`
+   * dedupes by id with the live run winning, so a run in both places is counted once.
+   */
   todaysCostUsd(): number {
     const midnight = new Date()
     midnight.setHours(0, 0, 0, 0)
     const since = midnight.getTime()
     let total = 0
-    for (const run of this.runs.values()) if (run.createdAt >= since) total += run.costUsd
+    for (const summary of this.list()) if (summary.createdAt >= since) total += summary.costUsd
     return total
-  }
-
-  private summarize(run: Run): RunSummary {
-    return {
-      id: run.id,
-      goal: run.goal,
-      preset: run.preset,
-      createdAt: run.createdAt,
-      status: run.status,
-    }
   }
 
   private readDiskMeta(): RunSummary[] {
@@ -135,13 +155,21 @@ export class RunStore {
   }
 
   private parseMeta(raw: string): RunSummary | null {
-    const m = JSON.parse(raw) as Partial<RunSummary>
-    const ok =
-      typeof m.id === "string" &&
-      typeof m.goal === "string" &&
-      typeof m.createdAt === "number" &&
-      ALL_STATUSES.includes(m.status as RunStatus) &&
-      PRESETS.includes(m.preset as Run["preset"])
-    return ok ? (m as RunSummary) : null
+    const { id, goal, preset, createdAt, status, costUsd } = JSON.parse(raw) as Partial<RunSummary>
+    if (typeof id !== "string" || typeof goal !== "string" || typeof createdAt !== "number") {
+      return null
+    }
+    if (!ALL_STATUSES.includes(status as RunStatus)) return null
+    if (!PRESETS.includes(preset as Run["preset"])) return null
+    return {
+      id,
+      goal,
+      preset: preset as Run["preset"],
+      createdAt,
+      status: status as RunStatus,
+      // A meta written before this process was billing (or by an older build) still lists; it
+      // reports no spend rather than dropping the run from the history.
+      costUsd: typeof costUsd === "number" && Number.isFinite(costUsd) ? costUsd : 0,
+    }
   }
 }

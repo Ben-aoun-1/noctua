@@ -57,6 +57,12 @@ export interface TurnResult {
   text: string
   /** The assistant message exactly as it came back — thinking blocks included, for replay. */
   assistantContent: Anthropic.ContentBlockParam[]
+  /**
+   * Why the turn ended, verbatim from the API (`tool_use`, `end_turn`, `refusal`, `max_tokens`,
+   * …). A turn with no tool call means something different in each case — a refusal has to end the
+   * run, a cut-off turn is narration worth noting — and only this tells them apart.
+   */
+  stopReason: string | null
   costUsd: number
 }
 
@@ -93,7 +99,10 @@ export interface StreamingClient {
  * money that was never spent.
  */
 export function costUsd(model: string, usage: TokenUsage): number {
-  const [inputPerMTok, outputPerMTok] = PRICES[model] ?? FALLBACK_PRICE
+  // Own-property lookup only: a model id off the environment named after an Object.prototype key
+  // ("constructor") would otherwise destructure a function and throw inside the meter, on a path
+  // that runs every turn of every run.
+  const [inputPerMTok, outputPerMTok] = Object.hasOwn(PRICES, model) ? PRICES[model]! : FALLBACK_PRICE
   const inputUsd =
     usage.inputTokens * inputPerMTok +
     ((usage.cacheReadTokens ?? 0) * inputPerMTok) / CACHE_READ_DIVISOR +
@@ -160,6 +169,7 @@ export class AnthropicLLM implements LLM {
         .map((b) => b.text)
         .join("\n"),
       assistantContent: msg.content,
+      stopReason: msg.stop_reason,
       costUsd: costUsd(this.model, {
         inputTokens: usage.input_tokens,
         outputTokens: usage.output_tokens,
@@ -213,6 +223,9 @@ export class FakeLLM implements LLM {
           ? [{ type: "tool_use" as const, id: toolUseId, name: toolName, input: toolInput }]
           : []),
       ],
+      // The reason the API would really have sent with such a turn, so a script only has to name
+      // one when it is testing the unusual endings (`refusal`, `max_tokens`).
+      stopReason: entry.stopReason ?? (toolName === null ? "end_turn" : "tool_use"),
       costUsd: entry.costUsd ?? FAKE_TURN_COST_USD,
     }
   }

@@ -145,6 +145,14 @@ describe("costUsd", () => {
     expect(unknown).toBe(30)
     expect(unknown).toBe(costUsd("claude-opus-5", { inputTokens: 1_000_000, outputTokens: 1_000_000 }))
   })
+
+  // A model id off the environment reaching Object.prototype would otherwise destructure a
+  // function and throw inside the meter — which runs on every turn of every run.
+  it("falls back for a model name that is an Object.prototype key", () => {
+    for (const name of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+      expect(costUsd(name, { inputTokens: 1_000_000, outputTokens: 1_000_000 })).toBe(30)
+    }
+  })
 })
 
 describe("FakeLLM", () => {
@@ -178,8 +186,22 @@ describe("FakeLLM", () => {
       toolUseId: "tu_0",
       text: "",
       assistantContent: [{ type: "text", text: "" }],
+      stopReason: "end_turn",
       costUsd: 0.01,
     })
+  })
+
+  // The loop reads stopReason to tell a refusal or a cut-off turn from ordinary narration, so a
+  // scripted turn has to carry the reason the API would really have sent with it.
+  it("defaults stopReason to tool_use when a tool was called, end_turn otherwise", async () => {
+    const llm = new FakeLLM([{ toolName: "click", toolInput: { ref: 2 } }, { text: "Just talking." }])
+    expect((await llm.turn(REQ, noop)).stopReason).toBe("tool_use")
+    expect((await llm.turn(REQ, noop)).stopReason).toBe("end_turn")
+  })
+
+  it("passes a scripted stopReason through", async () => {
+    const llm = new FakeLLM([{ text: "I can't help with that.", stopReason: "refusal" }])
+    expect((await llm.turn(REQ, noop)).stopReason).toBe("refusal")
   })
 
   // The loop replays assistantContent and pairs the tool_result by id, so a scripted tool call has
@@ -313,6 +335,31 @@ describe("AnthropicLLM — the result", () => {
     expect(result.toolUseId).toBeNull()
     expect(result.toolInput).toEqual({})
     expect(result.text).toBe("Just thinking.")
+  })
+
+  // The SDK types a tool_use input as `unknown`; anything that is not a plain object would reach
+  // executeTool as a non-object and blow up on the first property read.
+  it("reports no arguments when the tool input is not a plain object", async () => {
+    for (const input of [null, [1, 2], "text", 7]) {
+      const block = { ...toolUse, input } as Anthropic.ContentBlock
+      const { client } = mockClient({ final: message({ content: [block] }) })
+      const result = await new AnthropicLLM("claude-sonnet-5", client).turn(REQ, noop)
+      expect(result.toolName).toBe("type")
+      expect(result.toolInput).toEqual({})
+    }
+  })
+
+  // What the loop branches on: a refusal ends the run, a cut-off turn is narration worth noting.
+  it("reports the stop reason the API sent", async () => {
+    for (const stop of ["tool_use", "end_turn", "refusal", "max_tokens"] as const) {
+      const { client } = mockClient({ final: message({ stop_reason: stop }) })
+      expect((await new AnthropicLLM("claude-sonnet-5", client).turn(REQ, noop)).stopReason).toBe(stop)
+    }
+  })
+
+  it("reports a null stop reason rather than inventing one", async () => {
+    const { client } = mockClient({ final: message({ stop_reason: null }) })
+    expect((await new AnthropicLLM("claude-sonnet-5", client).turn(REQ, noop)).stopReason).toBeNull()
   })
 
   it("joins several text blocks without gluing sentences together", async () => {

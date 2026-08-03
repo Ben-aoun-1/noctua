@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Fixture Redirector</title>
+    <style>
+      body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem; color: #111; }
+    </style>
+  </head>
+  <body>
+    <h1>Sponsored listing</h1>
+    <p>This page looks ordinary and passes the check the navigate tool runs on it.</p>
+    <script>
+      // The whole point of this fixture: the hop happens long after `navigate` returned and its
+      // landing check passed, which is the gap the loop's capture-time re-check has to close.
+      // 1.5s is comfortably longer than a capture takes, so the redirect never lands mid-snapshot.
+      setTimeout(function () { location.href = "offsite.html" }, 1500)
+    </script>
+  </body>
+</html>

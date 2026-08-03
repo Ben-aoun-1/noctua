@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { RunControl, STOPPED_ANSWER, SUPERSEDED_ANSWER } from "../../src/runs/control.js"
-import { RunStore } from "../../src/runs/store.js"
+import { RunStore, persistRun } from "../../src/runs/store.js"
 
 const freshDir = () => mkdtempSync(join(tmpdir(), "noctua-"))
 /** Lets every already-scheduled promise callback run, so "did it block?" is a real assertion. */
@@ -191,6 +191,26 @@ describe("RunStore", () => {
       preset: "compliance",
       createdAt: run.createdAt,
       status: "pending",
+      costUsd: 0,
+    })
+  })
+
+  // Without this a restart shows every past run as `pending` for ever, and the daily cost cap
+  // forgets everything a crashed or restarted process already spent.
+  it("persistRun rewrites meta.json with the live status and cost", () => {
+    const dir = freshDir()
+    const store = new RunStore(dir)
+    const run = store.create("audit", null)
+    run.status = "finished"
+    run.costUsd = 0.42
+    persistRun(run)
+    expect(JSON.parse(readFileSync(join(dir, "runs", run.id, "meta.json"), "utf8"))).toEqual({
+      id: run.id,
+      goal: "audit",
+      preset: null,
+      createdAt: run.createdAt,
+      status: "finished",
+      costUsd: 0.42,
     })
   })
 
@@ -202,9 +222,10 @@ describe("RunStore", () => {
     a.createdAt = 1_000
     b.createdAt = 2_000
     b.status = "finished"
+    b.costUsd = 0.5
     expect(store.list()).toEqual([
-      { id: b.id, goal: "second", preset: null, createdAt: 2_000, status: "finished" },
-      { id: a.id, goal: "first", preset: "vendor", createdAt: 1_000, status: "pending" },
+      { id: b.id, goal: "second", preset: null, createdAt: 2_000, status: "finished", costUsd: 0.5 },
+      { id: a.id, goal: "first", preset: "vendor", createdAt: 1_000, status: "pending", costUsd: 0 },
     ])
   })
 
@@ -223,22 +244,38 @@ describe("RunStore", () => {
     const first = new RunStore(dir)
     const old = first.create("yesterday's flight", "vendor")
     old.status = "finished"
+    old.costUsd = 1.25
+    persistRun(old)
 
     const second = new RunStore(dir)
     const fresh = second.create("today's flight", null)
     expect(second.get(old.id)).toBeUndefined()
     const listed = second.list()
     expect(listed.map((r) => r.id).sort()).toEqual([old.id, fresh.id].sort())
-    // From disk: the meta written at create time.
+    // From disk: how the run really ended, not the `pending` it was created as.
     expect(listed.find((r) => r.id === old.id)).toEqual({
       id: old.id,
       goal: "yesterday's flight",
       preset: "vendor",
       createdAt: old.createdAt,
-      status: "pending",
+      status: "finished",
+      costUsd: 1.25,
     })
-    // In memory: the live status wins over the same run's meta.json.
-    expect(first.list().find((r) => r.id === old.id)!.status).toBe("finished")
+    // In memory: the live run wins over the same run's meta.json.
+    old.status = "stopped"
+    expect(first.list().find((r) => r.id === old.id)!.status).toBe("stopped")
+  })
+
+  it("reads a meta.json written before cost was recorded as costing nothing", () => {
+    const dir = freshDir()
+    mkdirSync(join(dir, "runs", "older"), { recursive: true })
+    writeFileSync(
+      join(dir, "runs", "older", "meta.json"),
+      JSON.stringify({ id: "older", goal: "g", preset: null, createdAt: 1, status: "finished" }),
+    )
+    expect(new RunStore(dir).list()).toEqual([
+      { id: "older", goal: "g", preset: null, createdAt: 1, status: "finished", costUsd: 0 },
+    ])
   })
 
   it("skips run directories whose meta.json is missing, corrupt or not a run", () => {
@@ -290,5 +327,27 @@ describe("RunStore", () => {
     midnight.setHours(0, 0, 0, 0)
     old.createdAt = midnight.getTime() - 1
     expect(store.todaysCostUsd()).toBeCloseTo(1.75, 10)
+  })
+
+  // The cap is a daily one, so a restart that forgot what earlier processes spent would hand the
+  // day a fresh $20 — and a run counted twice (live and on disk) would close the day early.
+  it("counts today's on-disk runs once, live state winning over meta", () => {
+    const dir = freshDir()
+    const first = new RunStore(dir)
+    const today = first.create("today", null)
+    today.costUsd = 0.75
+    persistRun(today)
+    const yesterday = first.create("yesterday", null)
+    yesterday.costUsd = 99
+    const midnight = new Date()
+    midnight.setHours(0, 0, 0, 0)
+    yesterday.createdAt = midnight.getTime() - 1
+    persistRun(yesterday)
+
+    expect(new RunStore(dir).todaysCostUsd()).toBeCloseTo(0.75, 10)
+
+    // The same run, still live in this process, must not be added to its own meta.json.
+    today.costUsd = 1.1
+    expect(first.todaysCostUsd()).toBeCloseTo(1.1, 10)
   })
 })

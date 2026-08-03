@@ -1,0 +1,566 @@
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
+import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import type Anthropic from "@anthropic-ai/sdk"
+import { runAgent, type LoopOpts } from "../../src/agent/loop.js"
+import {
+  FakeLLM,
+  type LLM,
+  type ScriptedTurn,
+  type TurnRequest,
+  type TurnResult,
+} from "../../src/agent/llm.js"
+import { config } from "../../src/config.js"
+import type { AgentEvent, RunStatus } from "../../src/events/types.js"
+import type { ApprovalDecision } from "../../src/runs/control.js"
+import { RunStore, type Run } from "../../src/runs/store.js"
+import { assertSafeUrl } from "../../src/safety/urlGuard.js"
+import { serveFixtures } from "../fixtures/serve.js"
+
+/**
+ * The loop end to end: a scripted model, a real chromium and the real fixture site, so every
+ * assertion here is about what the loop does with the parts rather than about mocks of them.
+ */
+
+const GOAL = "Verify Glowbar Ltd and record its VAT status"
+/** The stub `saveShot` returns this instead of writing a file; one test covers the real writer. */
+const SHOT = "/shot.jpg"
+
+let fx: Awaited<ReturnType<typeof serveFixtures>>
+let dataDir: string
+let store: RunStore
+
+beforeAll(async () => {
+  fx = await serveFixtures()
+})
+afterAll(async () => {
+  await fx.close()
+})
+beforeEach(() => {
+  dataDir = mkdtempSync(join(tmpdir(), "noctua-loop-"))
+  store = new RunStore(dataDir)
+})
+
+/**
+ * The fixture server binds 127.0.0.1, which `assertSafeUrl` blocks by design. Tests inject a
+ * checker that allows exactly that origin and delegates everything else to the real guard.
+ */
+function allowFixtureOrigin(baseUrl: string): (url: string) => Promise<void> {
+  return async (url: string) => {
+    if (url === baseUrl || url.startsWith(baseUrl + "/")) return
+    await assertSafeUrl(url)
+  }
+}
+
+/** Records every request the loop makes, so the observations can be asserted on. */
+class SpyLLM implements LLM {
+  readonly requests: TurnRequest[] = []
+
+  constructor(private readonly inner: LLM) {}
+
+  turn(req: TurnRequest, onThinkingDelta: (t: string) => void): Promise<TurnResult> {
+    this.requests.push(req)
+    return this.inner.turn(req, onThinkingDelta)
+  }
+}
+
+function textBlocks(message: Anthropic.MessageParam): string {
+  const content = message.content
+  if (typeof content === "string") return content
+  return content
+    .filter((b): b is Anthropic.TextBlockParam => b.type === "text")
+    .map((b) => b.text)
+    .join("\n")
+}
+
+/** The observation of one turn: the text of the last user message, which the screenshot rides on. */
+function observation(req: TurnRequest): string {
+  return textBlocks(req.messages[req.messages.length - 1]!)
+}
+
+/** The leading user message — the condensed "Earlier steps:" block once turns have aged out. */
+function leading(req: TurnRequest): string {
+  return textBlocks(req.messages[0]!)
+}
+
+/**
+ * Everything the model was shown that turn, tool results included — serialized because a tool
+ * result is a `tool_result` block, not a text one. Base64 image data cannot contain a space or a
+ * bracket, so it never matches the phrases asserted against this.
+ */
+function transcript(req: TurnRequest): string {
+  return JSON.stringify(req.messages.map((m) => m.content))
+}
+
+interface Driven {
+  run: Run
+  spy: SpyLLM
+  events: AgentEvent[]
+  of: <T extends AgentEvent["type"]>(type: T) => Extract<AgentEvent, { type: T }>[]
+  statuses: RunStatus[]
+}
+
+async function drive(
+  script: ScriptedTurn[],
+  setup: (run: Run) => void = () => {},
+  opts: LoopOpts = {},
+): Promise<Driven> {
+  const run = store.create(GOAL, "vendor")
+  const spy = new SpyLLM(new FakeLLM(script))
+  setup(run)
+  await runAgent(run, spy, {
+    saveShot: () => SHOT,
+    checkUrl: allowFixtureOrigin(fx.baseUrl),
+    ...opts,
+  })
+  const events = run.log.readAll().map((pe) => pe.event)
+  const of = <T extends AgentEvent["type"]>(type: T) =>
+    events.filter((e): e is Extract<AgentEvent, { type: T }> => e.type === type)
+  return { run, spy, events, of, statuses: of("run_status").map((e) => e.status) }
+}
+
+/**
+ * Answers each approval as it is proposed — synchronously, inside `log.append`. That timing is
+ * the point: `RunControl` drops a decision that arrives before `requestApproval` registered its
+ * resolver, so a loop that emitted the proposal first would wait here for ever.
+ */
+function decideOn(run: Run, ...decisions: ApprovalDecision[]): void {
+  const queue = [...decisions]
+  run.log.subscribe(1, (pe) => {
+    if (pe.event.type === "action_proposed") run.control.resolveApproval(queue.shift() ?? "approved")
+  })
+}
+
+/** Runs `fn` the first time an event of `type` is appended, synchronously. */
+function on(run: Run, type: AgentEvent["type"], fn: (e: AgentEvent) => void): void {
+  run.log.subscribe(1, (pe) => {
+    if (pe.event.type === type) fn(pe.event)
+  })
+}
+
+describe("the agent loop — happy path", () => {
+  it("drives navigate → submit → record_finding → finish to a successful done", async () => {
+    const finding = {
+      kind: "vendor",
+      legal_name: "Glowbar Ltd",
+      source: `${fx.baseUrl}/company.html?q=Glowbar`,
+    }
+    const { run, spy, of, statuses } = await drive(
+      [
+        {
+          thinking: "the registry first",
+          toolName: "navigate",
+          toolInput: { url: `${fx.baseUrl}/registry.html` },
+        },
+        // [2] is the search box in document order on registry.html; asserted below.
+        {
+          toolName: "type",
+          toolInput: { ref: 2, text: "Glowbar", submit: true, why: "search the register" },
+        },
+        { toolName: "record_finding", toolInput: { data: finding } },
+        { toolName: "finish", toolInput: { outcome: "success", summary: "Glowbar Ltd is active." } },
+      ],
+      (r) => decideOn(r, "approved"),
+    )
+
+    expect(of("done")).toEqual([
+      { type: "done", outcome: "success", summary: "Glowbar Ltd is active." },
+    ])
+    expect(run.status).toBe("finished")
+    expect(statuses[statuses.length - 1]).toBe("finished")
+    expect(of("action_result").map((e) => [e.tool, e.ok])).toEqual([
+      ["navigate", true],
+      ["type", true],
+      ["record_finding", true],
+      ["finish", true],
+    ])
+    expect(of("error")).toEqual([])
+    // Only turns that actually thought out loud: an empty delta is noise in the mind pane.
+    expect(of("thinking_delta")).toEqual([{ type: "thinking_delta", text: "the registry first" }])
+  })
+
+  it("records the finding on the run and stamps the step that produced it", async () => {
+    const finding = { kind: "vendor", legal_name: "Glowbar Ltd", source: "x" }
+    const { run, of } = await drive([
+      { toolName: "wait", toolInput: { seconds: 1, reason: "settling" } },
+      { toolName: "record_finding", toolInput: { data: finding } },
+      { toolName: "finish", toolInput: { outcome: "success", summary: "done" } },
+    ])
+    // The step is what pairs a finding with its screenshot in the report — the receipts feature.
+    expect(of("finding")).toEqual([{ type: "finding", data: finding, step: 2 }])
+    expect(run.findings).toEqual([finding])
+  })
+
+  it("gates a submitting type behind approval even in auto mode", async () => {
+    const args = { ref: 2, text: "Glowbar", submit: true, why: "search the register" }
+    const { spy, of, statuses } = await drive(
+      [
+        { toolName: "navigate", toolInput: { url: `${fx.baseUrl}/registry.html` } },
+        { toolName: "type", toolInput: args },
+        { toolName: "finish", toolInput: { outcome: "success", summary: "Found it." } },
+      ],
+      (r) => decideOn(r, "approved"),
+    )
+    expect(of("action_proposed")).toEqual([
+      { type: "action_proposed", tool: "type", args, guarded: true },
+    ])
+    expect(statuses).toContain("awaiting_approval")
+    // The listing the ref came from, and the page the submit actually landed on.
+    expect(observation(spy.requests[1]!)).toMatch(/\[2\] textbox "Company name"/)
+    expect(observation(spy.requests[2]!)).toMatch(/URL: \S+company\.html\?q=Glowbar/)
+  })
+
+  it("opens every observation with the task, the step budget and the finding count", async () => {
+    const { spy } = await drive([
+      { toolName: "record_finding", toolInput: { data: { a: "1" } } },
+      { toolName: "finish", toolInput: { outcome: "success", summary: "done" } },
+    ])
+    expect(spy.requests).toHaveLength(2)
+    spy.requests.forEach((req, i) => {
+      const text = observation(req)
+      // The goal has to lead every turn: the model reads far more observation than system prompt,
+      // and a run that drifts off task drifts because the task scrolled out of view.
+      expect(text.startsWith(`TASK: ${GOAL}\n`)).toBe(true)
+      expect(text).toContain(`Step ${i + 1} of ${config.maxSteps}.`)
+      expect(text).toContain("URL: about:blank")
+      expect(text).toContain(`Findings so far: ${i}`)
+    })
+  })
+
+  it("writes a screenshot per step and numbers it", async () => {
+    const { of } = await drive([
+      { toolName: "wait", toolInput: { seconds: 1, reason: "settling" } },
+      { toolName: "finish", toolInput: { outcome: "success", summary: "done" } },
+    ])
+    expect(of("screenshot")).toEqual([
+      { type: "screenshot", url: SHOT, step: 1 },
+      { type: "screenshot", url: SHOT, step: 2 },
+    ])
+  })
+
+  it("saves each step's shot under the run directory by default", async () => {
+    const run = store.create(GOAL, null)
+    const llm = new FakeLLM([
+      { toolName: "finish", toolInput: { outcome: "success", summary: "nothing to do" } },
+    ])
+    await runAgent(run, llm)
+    const shot = join(run.log.dir, "shots", "1.jpg")
+    expect(existsSync(shot)).toBe(true)
+    expect(statSync(shot).size).toBeGreaterThan(0)
+    expect(run.log.readAll().map((pe) => pe.event)).toContainEqual({
+      type: "screenshot",
+      url: `/api/runs/${run.id}/shots/1.jpg`,
+      step: 1,
+    })
+  })
+})
+
+describe("the agent loop — the human in the seat", () => {
+  it("carries a denial back to the model and never starts the action", async () => {
+    const url = `${fx.baseUrl}/registry.html`
+    const { run, spy, of, statuses } = await drive(
+      [
+        { toolName: "navigate", toolInput: { url } },
+        { toolName: "finish", toolInput: { outcome: "partial", summary: "The user said no." } },
+      ],
+      (r) => {
+        r.control.mode = "approve"
+        decideOn(r, "denied", "approved")
+      },
+    )
+    expect(of("action_proposed").map((e) => e.tool)).toEqual(["navigate", "finish"])
+    expect(of("action_started").map((e) => e.tool)).toEqual(["finish"])
+    expect(statuses).toContain("awaiting_approval")
+    expect(transcript(spy.requests[1]!)).toContain("The user DENIED this action.")
+    // The denied navigation really did not happen.
+    expect(observation(spy.requests[1]!)).toContain("URL: about:blank")
+    expect(of("done")).toEqual([
+      { type: "done", outcome: "partial", summary: "The user said no." },
+    ])
+    expect(run.status).toBe("finished")
+  })
+
+  it("asks the human, waits, and feeds the answer back as the tool result", async () => {
+    const question = "Which Glowbar — London or Leeds?"
+    const { spy, of, statuses } = await drive(
+      [
+        { toolName: "ask_human", toolInput: { question } },
+        {
+          toolName: "finish",
+          toolInput: { outcome: "success", summary: "The London one is active." },
+        },
+      ],
+      // Answered synchronously inside the event append: the same registration-order trap as
+      // approvals — RunControl drops an answer that arrives before askHuman is waiting.
+      (r) => on(r, "ask_human", () => r.control.answerHuman("the London one")),
+    )
+    expect(of("ask_human")).toEqual([{ type: "ask_human", question }])
+    expect(of("human_answer")).toEqual([{ type: "human_answer", text: "the London one" }])
+    expect(statuses).toContain("awaiting_human")
+    expect(transcript(spy.requests[1]!)).toContain("human answered: the London one")
+  })
+
+  it("ends the run when a stop settles an unanswered question", async () => {
+    const { run, spy, of } = await drive(
+      [{ toolName: "ask_human", toolInput: { question: "Which Glowbar?" } }],
+      (r) => on(r, "ask_human", () => r.control.stop()),
+    )
+    expect(of("human_answer")).toEqual([])
+    expect(of("done")).toEqual([
+      { type: "done", outcome: "stopped", summary: "0 finding(s) were preserved." },
+    ])
+    expect(run.status).toBe("stopped")
+    // No further turn was asked for — the script would have thrown if one had been.
+    expect(spy.requests).toHaveLength(1)
+  })
+
+  it("stops between turns, keeping the findings already recorded", async () => {
+    const { run, spy, of } = await drive(
+      [{ toolName: "record_finding", toolInput: { data: { a: "1" } } }],
+      (r) => on(r, "action_result", () => r.control.stop()),
+    )
+    expect(of("done")).toEqual([
+      { type: "done", outcome: "stopped", summary: "1 finding(s) were preserved." },
+    ])
+    expect(run.status).toBe("stopped")
+    expect(spy.requests).toHaveLength(1)
+  })
+
+  it("reports a paused run and carries on when it is resumed", async () => {
+    const { run, of, statuses } = await drive(
+      [{ toolName: "finish", toolInput: { outcome: "success", summary: "done" } }],
+      (r) => {
+        r.control.pause()
+        on(r, "run_status", (e) => {
+          if (e.type === "run_status" && e.status === "paused") r.control.resume()
+        })
+      },
+    )
+    expect(statuses).toEqual(["running", "paused", "running", "finished"])
+    expect(of("done")[0]!.outcome).toBe("success")
+    expect(run.status).toBe("finished")
+  })
+
+  it("ends a paused run that is stopped rather than resumed, without spending a turn", async () => {
+    const { run, spy, of, statuses } = await drive(
+      [{ toolName: "finish", toolInput: { outcome: "success", summary: "never reached" } }],
+      (r) => {
+        r.control.pause()
+        on(r, "run_status", (e) => {
+          if (e.type === "run_status" && e.status === "paused") r.control.stop()
+        })
+      },
+    )
+    // stop() releases the pause waiters, so the loop wakes up here; it must go back to its stop
+    // check rather than walk into a capture and a paid model turn.
+    expect(spy.requests).toEqual([])
+    expect(statuses).toEqual(["running", "paused", "stopped"])
+    expect(of("done")).toEqual([
+      { type: "done", outcome: "stopped", summary: "0 finding(s) were preserved." },
+    ])
+    expect(run.status).toBe("stopped")
+  })
+
+  it("passes steering notes into the very next observation, one steer event each", async () => {
+    const { spy, of } = await drive(
+      [
+        { toolName: "record_finding", toolInput: { data: { a: "1" } } },
+        { toolName: "finish", toolInput: { outcome: "success", summary: "done" } },
+      ],
+      (r) => {
+        r.control.addSteer("check the VAT number too")
+        on(r, "action_result", () => r.control.addSteer("then stop"))
+      },
+    )
+    expect(of("steer")).toEqual([
+      { type: "steer", text: "check the VAT number too" },
+      { type: "steer", text: "then stop" },
+    ])
+    expect(observation(spy.requests[0]!)).toContain("USER STEERING: check the VAT number too")
+    expect(observation(spy.requests[1]!)).toContain("USER STEERING: then stop")
+    // Drained, not repeated: a steer is an instruction for the next move, not a standing note.
+    expect(observation(spy.requests[1]!)).not.toContain("check the VAT number too")
+  })
+})
+
+describe("the agent loop — when things go wrong", () => {
+  it("feeds a failed action back as an observation and carries on", async () => {
+    const { run, spy, of } = await drive([
+      { toolName: "click", toolInput: { ref: 9999, why: "click nothing" } },
+      { toolName: "finish", toolInput: { outcome: "partial", summary: "Could not get there." } },
+    ])
+    expect(of("action_result")[0]).toEqual({
+      type: "action_result",
+      tool: "click",
+      ok: false,
+      summary: expect.stringContaining("stale ref [9999]"),
+    })
+    expect(of("error")).toEqual([
+      { type: "error", message: expect.stringContaining("stale ref [9999]"), recoverable: true },
+    ])
+    expect(transcript(spy.requests[1]!)).toContain("ERROR: stale ref [9999]")
+    expect(of("done")[0]!.outcome).toBe("partial")
+    expect(run.status).toBe("finished")
+  })
+
+  it("gives up after three turns with no tool call", async () => {
+    const { run, spy, of } = await drive([
+      { text: "Thinking about it." },
+      { text: "Still thinking." },
+      { text: "Hmm." },
+    ])
+    expect(of("done")).toEqual([
+      { type: "done", outcome: "partial", summary: "Agent stalled. 0 finding(s) were preserved." },
+    ])
+    expect(run.status).toBe("failed")
+    expect(of("action_started")).toEqual([])
+    expect(spy.requests).toHaveLength(3)
+    expect(transcript(spy.requests[1]!)).toContain("No tool was called.")
+  })
+
+  it("ends the run when the model refuses, instead of counting it as narration", async () => {
+    const { run, spy, of } = await drive([
+      { text: "I can't help with that.", stopReason: "refusal" },
+    ])
+    expect(of("error")).toEqual([
+      { type: "error", message: expect.stringContaining("safety"), recoverable: false },
+    ])
+    expect(of("done")).toHaveLength(1)
+    expect(of("done")[0]!.outcome).toBe("failed")
+    expect(of("done")[0]!.summary).toMatch(/declined for safety reasons/)
+    expect(run.status).toBe("failed")
+    expect(spy.requests).toHaveLength(1)
+  })
+
+  it("notes a turn cut off at the token limit in the condensed history", async () => {
+    const findings = Array.from({ length: 5 }, (_, i) => ({
+      toolName: "record_finding",
+      toolInput: { data: { n: String(i) } },
+    }))
+    const { spy } = await drive([
+      { text: "A thought that ran out of ro", stopReason: "max_tokens" },
+      { text: "Still deciding." },
+      ...findings,
+      { toolName: "finish", toolInput: { outcome: "partial", summary: "done" } },
+    ])
+    // By turn 8 the first two turns have aged out of the verbatim window, so all that is left of
+    // them is their summary line — which has to say *why* each turn called no tool.
+    const earlier = leading(spy.requests[7]!)
+    expect(earlier).toContain("Earlier steps:")
+    expect(earlier).toMatch(/step 1: .*token limit/)
+    expect(earlier).toMatch(/step 2: \(narration only\)/)
+  })
+
+  it("turns an unrecoverable failure into error + done rather than throwing", async () => {
+    const run = store.create(GOAL, null)
+    const boom: LLM = {
+      turn: () => Promise.reject(new Error("llm: 529 overloaded")),
+    }
+    await expect(runAgent(run, boom, { saveShot: () => SHOT })).resolves.toBeUndefined()
+    const events = run.log.readAll().map((pe) => pe.event)
+    expect(events).toContainEqual({
+      type: "error",
+      message: "llm: 529 overloaded",
+      recoverable: false,
+    })
+    const done = events.filter((e) => e.type === "done")
+    expect(done).toHaveLength(1)
+    expect(done[0]).toMatchObject({ outcome: "failed" })
+    expect(run.status).toBe("failed")
+  })
+
+  it("blanks the tab when a deferred redirect lands somewhere disallowed", async () => {
+    const blockOffsite = async (url: string) => {
+      if (url.includes("/offsite.html")) throw new Error("blocked: offsite.html")
+      await allowFixtureOrigin(fx.baseUrl)(url)
+    }
+    const { spy, of } = await drive(
+      [
+        { toolName: "navigate", toolInput: { url: `${fx.baseUrl}/redirect.html` } },
+        // The hop fires during this wait — after navigate's own landing check already passed.
+        { toolName: "wait", toolInput: { seconds: 2, reason: "the page is still settling" } },
+        { toolName: "finish", toolInput: { outcome: "partial", summary: "It redirected away." } },
+      ],
+      () => {},
+      { checkUrl: blockOffsite },
+    )
+    expect(observation(spy.requests[1]!)).toContain("/redirect.html")
+    expect(of("error")).toEqual([
+      { type: "error", message: expect.stringContaining("blocked: offsite.html"), recoverable: true },
+    ])
+    const after = observation(spy.requests[2]!)
+    expect(after).toContain("URL: about:blank")
+    expect(after).toContain("redirected somewhere disallowed and was closed")
+    expect(of("done")[0]!.outcome).toBe("partial")
+  })
+})
+
+describe("the agent loop — budgets and bookkeeping", () => {
+  const maxSteps = config.maxSteps
+  afterEach(() => {
+    config.maxSteps = maxSteps
+  })
+
+  it("warns once past the step budget, then finishes the run itself", async () => {
+    config.maxSteps = 2
+    const record = { toolName: "record_finding", toolInput: { data: { a: "1" } } }
+    const { run, spy, of } = await drive([record, record, record])
+    expect(observation(spy.requests[0]!)).not.toContain("BUDGET EXHAUSTED")
+    expect(observation(spy.requests[2]!)).toContain(
+      "BUDGET EXHAUSTED — you MUST call finish now with what you have.",
+    )
+    expect(of("done")).toEqual([
+      {
+        type: "done",
+        outcome: "partial",
+        summary: "Budget exhausted. 3 finding(s) were preserved.",
+      },
+    ])
+    expect(run.status).toBe("finished")
+    expect(of("budget")[of("budget").length - 1]).toEqual({
+      type: "budget",
+      steps: 3,
+      maxSteps: 2,
+      costUsd: 0.03,
+      maxCostUsd: config.maxRunCostUsd,
+    })
+  })
+
+  it("meters each turn onto the run and reports it", async () => {
+    const { run, of } = await drive([
+      { toolName: "record_finding", toolInput: { data: { a: "1" } }, costUsd: 0.2 },
+      { toolName: "finish", toolInput: { outcome: "success", summary: "done" }, costUsd: 0.1 },
+    ])
+    expect(run.costUsd).toBeCloseTo(0.3, 10)
+    expect(of("budget").map((e) => e.costUsd)).toEqual([0.2, 0.3])
+    expect(of("budget")[0]).toMatchObject({ steps: 1, maxSteps: config.maxSteps })
+  })
+
+  it("persists status and cost to meta.json, so a restart lists the run as it ended", async () => {
+    const { run } = await drive([
+      { toolName: "finish", toolInput: { outcome: "success", summary: "done" }, costUsd: 0.25 },
+    ])
+    const meta = JSON.parse(readFileSync(join(run.log.dir, "meta.json"), "utf8"))
+    expect(meta).toEqual({
+      id: run.id,
+      goal: GOAL,
+      preset: "vendor",
+      createdAt: run.createdAt,
+      status: "finished",
+      costUsd: 0.25,
+    })
+    // A process that never saw this run still reports it correctly, cost included.
+    expect(new RunStore(dataDir).list()).toEqual([
+      {
+        id: run.id,
+        goal: GOAL,
+        preset: "vendor",
+        createdAt: run.createdAt,
+        status: "finished",
+        costUsd: 0.25,
+      },
+    ])
+    expect(new RunStore(dataDir).todaysCostUsd()).toBeCloseTo(0.25, 10)
+  })
+})
