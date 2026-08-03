@@ -183,4 +183,65 @@
     border-color: color-mix(in oklab, var(--ink) 15%, transparent);
     cursor: not-allowed;
   }
+
+  /*
+   * The replay dial: the same hairline the rest of the system divides with, with one ink dot riding
+   * it. Written out per engine rather than left to `accent-color`, which paints a platform slider —
+   * a chrome-blue capsule on a 4px grey rail is the one control on the screen that would look
+   * borrowed. `accent-ink` stays on the element as the fallback for anything that ignores these.
+   */
+  .scrub {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 12px;
+    background-color: transparent;
+    cursor: pointer;
+  }
+
+  .scrub::-webkit-slider-runnable-track,
+  .scrub::-moz-range-track,
+  .scrub::-moz-range-progress {
+    height: 1px;
+    border: 0;
+    background-color: color-mix(in oklab, var(--ink) 20%, transparent);
+  }
+
+  .scrub::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 10px;
+    height: 10px;
+    /* Half the thumb minus half the track: the dot sits *on* the hairline, not above it. */
+    margin-top: -4.5px;
+    border-radius: 999px;
+    background-color: var(--ink);
+  }
+
+  .scrub::-moz-range-thumb {
+    width: 10px;
+    height: 10px;
+    border: 0;
+    border-radius: 999px;
+    background-color: var(--ink);
+  }
+
+  /* The About panel comes in from the edge it lives on, once, in under a fifth of a second. */
+  .slide-over {
+    animation: slide-over 180ms ease-out;
+  }
+}
+
+@keyframes slide-over {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+/* Motion here is decoration; anyone who has asked for less of it gets the panel already in place. */
+@media (prefers-reduced-motion: reduce) {
+  .slide-over {
+    animation: none;
+  }
 }

@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ApiError, getRun, type DoneOutcome, type PersistedEvent } from "../api.ts"
+import AboutPanel from "../components/AboutPanel.tsx"
 import ControlBar, { ApprovalStrip, AskStrip } from "../components/ControlBar.tsx"
 import EyesPane from "../components/EyesPane.tsx"
 import FindingsPane, { type Finding } from "../components/FindingsPane.tsx"
 import MindPane from "../components/MindPane.tsx"
 import OwlMark from "../components/OwlMark.tsx"
+import ReplayBar from "../components/ReplayBar.tsx"
 import StatusDot from "../components/StatusDot.tsx"
 import { isTerminal, useRunStream } from "../useRunStream.ts"
 
@@ -19,6 +21,12 @@ import { isTerminal, useRunStream } from "../useRunStream.ts"
  * event this client already holds, so opening one costs no request at all.
  *
  * The one thing the events do not carry is the run's goal, which is read once from the run list.
+ *
+ * That single-source-of-truth is also what makes time travel free. A finished run is scrubbed by
+ * handing the panes `events` up to a seq instead of all of them: the reasoning column truncates,
+ * the live view falls back to the frame of that moment, the table loses the rows that had not been
+ * confirmed yet — not because three components implement rewinding, but because none of them can
+ * tell the difference between the past and a shorter log.
  */
 
 interface Digest {
@@ -54,8 +62,40 @@ export default function Cockpit({ id }: { id: string }) {
   const [goalMissing, setGoalMissing] = useState(false)
   /** The receipt currently open, shared by the findings table and the live view. */
   const [receiptStep, setReceiptStep] = useState<number | null>(null)
+  /**
+   * Where the replay dial is being held, or null for "wherever the log currently ends".
+   *
+   * Null rather than a number for the resting state, so a run that finishes while it is being
+   * watched does not strand the cockpit on the second-to-last event: nothing has to notice the
+   * arrival of a new event and push the cursor along behind it.
+   */
+  const [pinned, setPinned] = useState<number | null>(null)
+  const [about, setAbout] = useState(false)
+  const aboutButton = useRef<HTMLButtonElement>(null)
 
-  const view = useMemo(() => digest(events), [events])
+  const maxSeq = events.length === 0 ? 0 : events[events.length - 1].seq
+  const cursor = pinned ?? maxSeq
+  // Identity matters: an unpinned cockpit hands the panes the very same array it was given, so
+  // watching a live run costs no copy per event.
+  const shown = useMemo(
+    () => (pinned === null ? events : events.filter((entry) => entry.seq <= pinned)),
+    [events, pinned],
+  )
+  const view = useMemo(() => digest(shown), [shown])
+
+  // Stable, because playback re-arms its timeout whenever this changes identity.
+  const seek = useCallback(
+    (seq: number) => setPinned(Math.max(0, Math.min(seq, maxSeq))),
+    [maxSeq],
+  )
+
+  // A receipt whose row has been scrubbed out of existence closes itself, rather than pinning the
+  // live view to a frame with no visible finding left to explain why.
+  useEffect(() => {
+    if (receiptStep !== null && !view.findings.some((finding) => finding.step === receiptStep)) {
+      setReceiptStep(null)
+    }
+  }, [view, receiptStep])
 
   // Read once: a run's goal never changes, and the list is the only projection that carries it.
   useEffect(() => {
@@ -80,9 +120,9 @@ export default function Cockpit({ id }: { id: string }) {
   }, [id])
 
   const over = isTerminal(status)
-  const pinned = receiptStep === null ? null : (view.shots.get(receiptStep) ?? null)
+  const pinnedShot = receiptStep === null ? null : (view.shots.get(receiptStep) ?? null)
   const shownStep = receiptStep ?? view.latestShot?.step ?? null
-  const shownUrl = receiptStep === null ? (view.latestShot?.url ?? null) : pinned
+  const shownUrl = receiptStep === null ? (view.latestShot?.url ?? null) : pinnedShot
 
   return (
     <div className="flex min-h-screen flex-col lg:h-screen lg:overflow-hidden">
@@ -101,6 +141,17 @@ export default function Cockpit({ id }: { id: string }) {
             <StatusDot status={status} />
             <span aria-hidden>{status.replace("_", " ")}</span>
           </span>
+          <button
+            ref={aboutButton}
+            className="chip shrink-0 hover:bg-sand"
+            aria-label="About Noctua"
+            aria-haspopup="dialog"
+            aria-expanded={about}
+            onClick={() => setAbout(true)}
+            data-testid="about-open"
+          >
+            <span aria-hidden>?</span>
+          </button>
           <a className="microlabel shrink-0 hover:text-ink max-sm:hidden" href="#/">
             ← ALL FLIGHTS
           </a>
@@ -116,7 +167,7 @@ export default function Cockpit({ id }: { id: string }) {
       </header>
 
       <main className="mx-auto grid w-full max-w-[1600px] grow gap-4 px-5 py-4 sm:px-8 lg:min-h-0 lg:grid-cols-[minmax(280px,1fr)_minmax(400px,1.4fr)_minmax(300px,1fr)] lg:overflow-hidden">
-        <MindPane events={events} />
+        <MindPane events={shown} />
         <EyesPane
           url={shownUrl}
           step={shownStep}
@@ -136,12 +187,34 @@ export default function Cockpit({ id }: { id: string }) {
       </main>
 
       <footer className="sticky bottom-0 z-10 shrink-0">
-        {view.approval && (
+        {/* Guarded by `over` as well as by the digest, which clears both on the run's own last
+            event: scrubbed back to the middle of a finished run, the log genuinely does say that
+            something was waiting on a human — and offering to answer a question that was settled
+            days ago would be the one place this cockpit lied about which way time runs. */}
+        {!over && view.approval && (
           <ApprovalStrip runId={id} tool={view.approval.tool} args={view.approval.args} />
         )}
-        {view.question !== null && <AskStrip runId={id} question={view.question} />}
+        {!over && view.question !== null && <AskStrip runId={id} question={view.question} />}
+        {over && maxSeq > 0 && (
+          <ReplayBar
+            maxSeq={maxSeq}
+            cursor={cursor}
+            step={view.latestShot?.step ?? null}
+            onSeek={seek}
+            onEnd={() => setPinned(null)}
+          />
+        )}
         <ControlBar runId={id} status={status} budget={view.budget} />
       </footer>
+
+      {about && (
+        <AboutPanel
+          onClose={() => {
+            setAbout(false)
+            aboutButton.current?.focus()
+          }}
+        />
+      )}
     </div>
   )
 }
