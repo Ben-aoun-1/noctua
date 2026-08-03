@@ -32,6 +32,11 @@ function allBlocks(messages: Anthropic.MessageParam[]): Anthropic.ContentBlockPa
   return messages.flatMap((m) => (typeof m.content === "string" ? [] : m.content))
 }
 
+/** The messages a one-turn history renders between the leading block and the observation. */
+function soleTurn(h: History): Anthropic.MessageParam[] {
+  return h.toMessages(OBS).slice(1, -1)
+}
+
 function textOf(message: Anthropic.MessageParam): string {
   if (typeof message.content === "string") return message.content
   return message.content
@@ -45,11 +50,29 @@ describe("History — the condensed block", () => {
     expect(KEEP_VERBATIM).toBe(5)
   })
 
+  // The Messages API rejects an array whose first message is an assistant one, so something has
+  // to lead. Until turns start aging out, that is a fixed placeholder rather than an empty list.
+  it("always leads with a user text message, at every depth of history", () => {
+    for (let n = 0; n <= KEEP_VERBATIM + 3; n++) {
+      const first = withTurns(n).toMessages(OBS)[0]!
+      expect(first.role, `${n} turns`).toBe("user")
+      const kinds = (typeof first.content === "string" ? [] : first.content).map((b) => b.type)
+      expect(kinds, `${n} turns`).toEqual(["text"])
+    }
+  })
+
   it("omits the condensed block when there are no old turns", () => {
     const messages = withTurns(2).toMessages(OBS)
-    expect(textOf(messages[0]!)).not.toContain("Earlier steps:")
-    expect(messages[0]!.role).toBe("assistant")
     expect(messages.map(textOf).join("\n")).not.toContain("Earlier steps:")
+    expect(textOf(messages[0]!)).toBe("(start of run — no earlier steps to summarize)")
+    // The placeholder stands in for the condensed block; the verbatim window follows it.
+    expect(messages[1]!.role).toBe("assistant")
+  })
+
+  it("keeps that placeholder right up to the last unpruned turn", () => {
+    const placeholder = "(start of run — no earlier steps to summarize)"
+    expect(textOf(withTurns(KEEP_VERBATIM).toMessages(OBS)[0]!)).toBe(placeholder)
+    expect(textOf(withTurns(KEEP_VERBATIM + 1).toMessages(OBS)[0]!)).not.toBe(placeholder)
   })
 
   it("omits it at exactly KEEP_VERBATIM turns, adds it at one more", () => {
@@ -115,13 +138,14 @@ describe("History — verbatim turns", () => {
   it("alternates assistant and user across the verbatim window", () => {
     const messages = withTurns(3).toMessages(OBS)
     expect(messages.map((m) => m.role)).toEqual([
+      "user", // the leading block
       "assistant",
       "user",
       "assistant",
       "user",
       "assistant",
       "user",
-      "user",
+      "user", // the observation
     ])
   })
 
@@ -133,8 +157,7 @@ describe("History — verbatim turns", () => {
     ]
     const h = new History()
     h.addTurn(turn(9, { assistantContent: thinking }))
-    const messages = h.toMessages(OBS)
-    expect(messages[0]!.content).toEqual(thinking)
+    expect(soleTurn(h)[0]!.content).toEqual(thinking)
   })
 
   it("renders a turn with no tool call as a plain text user message", () => {
@@ -146,14 +169,13 @@ describe("History — verbatim turns", () => {
         toolResultText: "No tool was called. Continue with exactly one tool call, or call finish.",
       }),
     )
-    const messages = h.toMessages(OBS)
-    expect(messages[1]!.content).toEqual([
+    expect(soleTurn(h)[1]!.content).toEqual([
       {
         type: "text",
         text: "No tool was called. Continue with exactly one tool call, or call finish.",
       },
     ])
-    expect(allBlocks(messages).some((b) => b.type === "tool_result")).toBe(false)
+    expect(allBlocks(h.toMessages(OBS)).some((b) => b.type === "tool_result")).toBe(false)
   })
 
   // A tool_result whose id is not in the preceding assistant message is a 400 from the API, which
@@ -161,15 +183,14 @@ describe("History — verbatim turns", () => {
   it("degrades to plain text when the recorded id is absent from the assistant content", () => {
     const h = new History()
     h.addTurn(turn(1, { assistantContent: [{ type: "text", text: "no tool_use here" }] }))
-    const messages = h.toMessages(OBS)
-    expect(messages[1]!.content).toEqual([{ type: "text", text: "result 1" }])
+    expect(soleTurn(h)[1]!.content).toEqual([{ type: "text", text: "result 1" }])
   })
 
   // An empty text block is a 400 too ("text content blocks must be non-empty").
   it("substitutes a description when a tool comes back with no output at all", () => {
     const h = new History()
     h.addTurn(turn(1, { toolResultText: "   " }))
-    expect(h.toMessages(OBS)[1]!.content).toEqual([
+    expect(soleTurn(h)[1]!.content).toEqual([
       { type: "tool_result", tool_use_id: "tu_1", content: "(the tool returned no output)" },
     ])
   })
@@ -178,18 +199,38 @@ describe("History — verbatim turns", () => {
   it("drops an assistant message with no content blocks", () => {
     const h = new History()
     h.addTurn(turn(1, { assistantContent: [], toolUseId: null }))
-    const messages = h.toMessages(OBS)
-    expect(messages).toHaveLength(2)
-    expect(messages[0]!.role).toBe("user")
-    expect(textOf(messages[0]!)).toBe("result 1")
+    const only = soleTurn(h)
+    expect(only).toHaveLength(1)
+    expect(only[0]!.role).toBe("user")
+    expect(textOf(only[0]!)).toBe("result 1")
+  })
+
+  // Pruning has to be real in memory too — nothing in the rendered array can show that, so this
+  // one test deliberately reaches inside: an aged turn keeps its summary line and nothing else.
+  it("releases a turn's transcript once it ages out of the window", () => {
+    const inside = withTurns(8) as unknown as { pruned: string[]; recent: TurnRecord[] }
+    expect(inside.recent).toHaveLength(KEEP_VERBATIM)
+    expect(inside.recent.map((t) => t.summaryLine)).toEqual([
+      "step 4: clicked [4]",
+      "step 5: clicked [5]",
+      "step 6: clicked [6]",
+      "step 7: clicked [7]",
+      "step 8: clicked [8]",
+    ])
+    expect(inside.pruned).toEqual([
+      "step 1: clicked [1]",
+      "step 2: clicked [2]",
+      "step 3: clicked [3]",
+    ])
   })
 })
 
 describe("History — the observation", () => {
-  it("is the only message when nothing has happened yet", () => {
+  it("follows the leading block on turn 1, with nothing in between", () => {
     const messages = new History().toMessages(OBS)
-    expect(messages).toHaveLength(1)
-    expect(messages[0]!.role).toBe("user")
+    expect(messages).toHaveLength(2)
+    expect(messages.map((m) => m.role)).toEqual(["user", "user"])
+    expect(textOf(messages[0]!)).toBe("(start of run — no earlier steps to summarize)")
   })
 
   it("comes last, as a user message: observation text, then the screenshot", () => {

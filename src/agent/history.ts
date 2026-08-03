@@ -11,6 +11,9 @@ import type Anthropic from "@anthropic-ai/sdk"
  *   the model see its own recent reasoning and the results it actually got, and
  * - everything older collapses into a single "Earlier steps:" list of one-line summaries.
  *
+ * The pruning is real in memory too: an aged-out turn keeps its summary line and drops its
+ * transcript, so a hundred-step run holds one line per old step rather than a hundred transcripts.
+ *
  * The screenshot of the *current* page is the only image in the array. Turns carry no images (a
  * `TurnRecord` holds text and tool blocks only), so the model never has to work out which of five
  * pictures is the page it is looking at now.
@@ -18,6 +21,13 @@ import type Anthropic from "@anthropic-ai/sdk"
 
 /** How many turns are replayed verbatim; older ones survive only as their `summaryLine`. */
 export const KEEP_VERBATIM = 5
+
+/**
+ * The leading message before anything has been condensed. The array must open on a `user`
+ * message — the API rejects an assistant-first one — and from turn 2 to turn 6 the first recorded
+ * turn is an assistant message, so something must stand where the condensed block will later go.
+ */
+const NO_EARLIER_STEPS = "(start of run — no earlier steps to summarize)"
 
 /** Stands in for a result the caller left blank; the API rejects an empty text block. */
 const NO_OUTPUT = "(the tool returned no output)"
@@ -35,26 +45,27 @@ export interface TurnRecord {
 }
 
 export class History {
-  private readonly turns: TurnRecord[] = []
+  /** Summary lines of turns that have aged out; their transcripts are gone. */
+  private readonly pruned: string[] = []
+  /** The verbatim window: never longer than {@link KEEP_VERBATIM}. */
+  private readonly recent: TurnRecord[] = []
 
   addTurn(t: TurnRecord): void {
-    this.turns.push(t)
+    this.recent.push(t)
+    // Everything an aged-out turn will ever contribute again is its one summary line, so let the
+    // rest go here rather than carrying a whole run's transcripts to the end of the run.
+    for (const aged of this.recent.splice(0, this.recent.length - KEEP_VERBATIM)) {
+      this.pruned.push(aged.summaryLine)
+    }
   }
 
   /** The full message array for one API call, ending in the page the agent is looking at now. */
   toMessages(observation: { text: string; screenshotJpeg: Buffer }): Anthropic.MessageParam[] {
-    const messages: Anthropic.MessageParam[] = []
-    const cut = Math.max(0, this.turns.length - KEEP_VERBATIM)
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: [{ type: "text", text: this.leadingText() }] },
+    ]
 
-    const older = this.turns.slice(0, cut)
-    if (older.length > 0) {
-      // One summary is one item: a newline inside one would read as a second entry, or as a line
-      // of instructions standing on its own — and a summary can quote a page or an error message.
-      const lines = older.map((t) => `- ${t.summaryLine.replace(/\s+/g, " ").trim()}`).join("\n")
-      messages.push({ role: "user", content: [{ type: "text", text: `Earlier steps:\n${lines}` }] })
-    }
-
-    for (const turn of this.turns.slice(cut)) {
+    for (const turn of this.recent) {
       // The API rejects a message with no content blocks. Consecutive same-role messages are
       // merged server-side, so dropping an empty assistant turn is safe where inventing one is not.
       if (turn.assistantContent.length > 0) {
@@ -78,6 +89,15 @@ export class History {
       ],
     })
     return messages
+  }
+
+  /** The condensed block, or its placeholder while nothing has aged out yet. */
+  private leadingText(): string {
+    if (this.pruned.length === 0) return NO_EARLIER_STEPS
+    // One summary is one item: a newline inside one would read as a second entry, or as a line of
+    // instructions standing on its own — and a summary can quote a page or an error message.
+    const lines = this.pruned.map((s) => `- ${s.replace(/\s+/g, " ").trim()}`).join("\n")
+    return `Earlier steps:\n${lines}`
   }
 
   /**
