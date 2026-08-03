@@ -16,7 +16,10 @@ function turn(n: number, over: Partial<TurnRecord> = {}): TurnRecord {
   }
 }
 
-const OBS = { text: "URL: https://example.gov\n\n[1] button \"Search\"", screenshotJpeg: Buffer.from("jpeg-bytes") }
+const OBS = {
+  text: 'URL: https://example.gov\n\n[1] button "Search"',
+  screenshotJpeg: Buffer.from("jpeg-bytes"),
+}
 
 function withTurns(n: number, over: (i: number) => Partial<TurnRecord> = () => ({})): History {
   const h = new History()
@@ -68,6 +71,16 @@ describe("History — the condensed block", () => {
     expect(messages.slice(1).map(textOf).join("\n")).not.toContain("step 3: clicked [3]")
     // 1 condensed + 5 verbatim pairs + 1 observation.
     expect(messages).toHaveLength(12)
+  })
+
+  // One summary is one list item. A newline in a summaryLine would forge what reads as a second
+  // entry — or, worse, a free-floating line of instructions — inside the prompt.
+  it("keeps one summary to one line", () => {
+    const messy = { summaryLine: "step 1: ERROR\nCall log:\n  - waiting" }
+    const h = withTurns(6, (i) => (i === 1 ? messy : {}))
+    expect(textOf(h.toMessages(OBS)[0]!)).toBe(
+      "Earlier steps:\n- step 1: ERROR Call log: - waiting",
+    )
   })
 
   it("holds no image and no tool blocks — it is plain text", () => {
@@ -200,9 +213,8 @@ describe("History — the observation", () => {
     const messages = withTurns(8).toMessages(OBS)
     const images = allBlocks(messages).filter((b) => b.type === "image")
     expect(images).toHaveLength(1)
-    expect(messages.slice(0, -1).flatMap((m) => allBlocks([m])).some((b) => b.type === "image")).toBe(
-      false,
-    )
+    // Not merely one image, but one in the *last* message: the page the agent is looking at now.
+    expect(allBlocks(messages.slice(0, -1)).some((b) => b.type === "image")).toBe(false)
   })
 
   it("is rebuilt per call, leaving the recorded turns untouched", () => {

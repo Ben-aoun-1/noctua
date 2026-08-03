@@ -48,7 +48,9 @@ export class History {
 
     const older = this.turns.slice(0, cut)
     if (older.length > 0) {
-      const lines = older.map((t) => `- ${t.summaryLine}`).join("\n")
+      // One summary is one item: a newline inside one would read as a second entry, or as a line
+      // of instructions standing on its own — and a summary can quote a page or an error message.
+      const lines = older.map((t) => `- ${t.summaryLine.replace(/\s+/g, " ").trim()}`).join("\n")
       messages.push({ role: "user", content: [{ type: "text", text: `Earlier steps:\n${lines}` }] })
     }
 
@@ -86,11 +88,10 @@ export class History {
    */
   private resultBlock(turn: TurnRecord): Anthropic.ContentBlockParam {
     const text = turn.toolResultText.trim() === "" ? NO_OUTPUT : turn.toolResultText
-    const paired =
-      turn.toolUseId !== null &&
-      turn.assistantContent.some((b) => b.type === "tool_use" && b.id === turn.toolUseId)
-    return paired
-      ? { type: "tool_result", tool_use_id: turn.toolUseId!, content: text }
-      : { type: "text", text }
+    const id = turn.toolUseId
+    if (id !== null && turn.assistantContent.some((b) => b.type === "tool_use" && b.id === id)) {
+      return { type: "tool_result", tool_use_id: id, content: text }
+    }
+    return { type: "text", text }
   }
 }
