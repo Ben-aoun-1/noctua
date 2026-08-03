@@ -47,8 +47,9 @@ const SECTIONS: Section[] = [
       "Every number in the findings table carries a receipt. The small chip at the end of a row is " +
       "the step the fact was read on; click it and you get the address it was read from, and the " +
       "page exactly as it looked at that moment. Where a finding recorded no source, the receipt " +
-      "says so rather than covering for it. Either way you are told where a figure came from, " +
-      "which is the difference between an answer you have to trust and one you can check.",
+      "says so rather than covering for it. Either way you are told what the receipt can and " +
+      "cannot show, which is the difference between an answer you have to trust and one you can " +
+      "check.",
   },
   {
     head: "STEERING IT",
@@ -62,12 +63,11 @@ const SECTIONS: Section[] = [
   {
     head: "THE GUARDRAILS",
     body:
-      "It never types a password, an API key or a card number, even if it is handed one — a login " +
-      "wall is a question for you, not an obstacle to work around. Filling in a field and pressing " +
-      "Enter to submit it stops for your approval even in autopilot, and approve-each-step gates " +
-      "every action there is. Every run carries a hard ceiling on steps, on cost and on minutes, " +
-      "and stops when one is reached. Addresses on private networks are refused before a tab is " +
-      "opened.",
+      "It is instructed never to type a password, an API key or a card number, and to hand a login " +
+      "or payment wall back to you instead. Filling in a field and pressing Enter to submit it " +
+      "stops for your approval even in autopilot, and approve-each-step gates every action there " +
+      "is. Every run carries a hard ceiling on steps, on cost and on minutes, and stops when one " +
+      "is reached. Addresses on private networks are refused before a tab is opened.",
   },
   {
     head: "WHEN IT GETS STUCK",
