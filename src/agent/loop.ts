@@ -87,7 +87,13 @@ export async function runAgent(run: Run, llm: LLM, opts: LoopOpts = {}): Promise
     persist()
     emit({ type: "run_status", status })
   }
+  // A run ends once. If the write of the status line that follows a `done` fails, the outer catch
+  // takes over with the run already over — and a second `done` would leave the UI, and the report
+  // that is built by replaying this log, with two endings.
+  let ended = false
   const endRun = (outcome: DoneOutcome, summary: string, status: RunStatus): void => {
+    if (ended) return
+    ended = true
     emit({ type: "done", outcome, summary })
     setStatus(status)
   }
@@ -307,8 +313,20 @@ export async function runAgent(run: Run, llm: LLM, opts: LoopOpts = {}): Promise
     }
   } catch (err) {
     const message = errorMessage(err)
-    emit({ type: "error", message, recoverable: false })
-    endRun("failed", `Unrecoverable error: ${message}. ${partialSummary(findings)}`, "failed")
+    // Reporting a failure must not be able to fail: when the event log is what broke, there is
+    // nowhere left to say so, and the caller is a fire-and-forget route with nowhere to put an
+    // exception. Two guards rather than one, so a dead `error` write still lets `endRun` mark the
+    // run terminal in memory and on disk.
+    try {
+      emit({ type: "error", message, recoverable: false })
+    } catch {
+      // ignored on purpose
+    }
+    try {
+      endRun("failed", `Unrecoverable error: ${message}. ${partialSummary(findings)}`, "failed")
+    } catch {
+      // ignored on purpose
+    }
   } finally {
     await bp?.close().catch(() => undefined)
   }

@@ -494,6 +494,82 @@ describe("the agent loop — when things go wrong", () => {
     expect(after).toContain("redirected somewhere disallowed and was closed")
     expect(of("done")[0]!.outcome).toBe("partial")
   })
+
+  /**
+   * Both cases below kill the event log part-way through the shutdown, which is the one moment
+   * the loop cannot report anything: the log is what reporting *is*.
+   */
+  it("emits one done even when the status line after it cannot be written", async () => {
+    const run = store.create(GOAL, null)
+    const real = run.log.append.bind(run.log)
+    let sawDone = false
+    // Fails only the run_status that follows the done event — so a second done, if the loop tried
+    // one, would be written to disk and this test would see it.
+    run.log.append = (e: AgentEvent) => {
+      if (sawDone && e.type === "run_status") throw new Error("ENOSPC: no space left on device")
+      if (e.type === "done") sawDone = true
+      return real(e)
+    }
+    const llm = new FakeLLM([
+      { toolName: "finish", toolInput: { outcome: "success", summary: "Glowbar Ltd is active." } },
+    ])
+    await expect(runAgent(run, llm, { saveShot: () => SHOT })).resolves.toBeUndefined()
+
+    const done = run.log.readAll().filter((pe) => pe.event.type === "done")
+    expect(done).toHaveLength(1)
+    expect(done[0]!.event).toEqual({
+      type: "done",
+      outcome: "success",
+      summary: "Glowbar Ltd is active.",
+    })
+    // The run really did finish; only the log write failed.
+    expect(run.status).toBe("finished")
+  })
+
+  it("still resolves when the event log itself is unwritable", async () => {
+    const run = store.create(GOAL, null)
+    const real = run.log.append.bind(run.log)
+    let sawDone = false
+    run.log.append = (e: AgentEvent) => {
+      if (sawDone) throw new Error("ENOSPC: no space left on device")
+      if (e.type === "done") sawDone = true
+      return real(e)
+    }
+    const llm = new FakeLLM([
+      { toolName: "finish", toolInput: { outcome: "success", summary: "done" } },
+    ])
+    // The caller is a fire-and-forget route with nowhere to put an exception, so the reporting of
+    // a failure must not itself be able to throw.
+    await expect(runAgent(run, llm, { saveShot: () => SHOT })).resolves.toBeUndefined()
+    expect(run.log.readAll().filter((pe) => pe.event.type === "done")).toHaveLength(1)
+  })
+
+  it("tells the model it looks stuck, and stops saying so once it moves again", async () => {
+    // Going back on a tab with no history is the cheapest way to spend a turn achieving nothing:
+    // same URL, no new finding, no wait.
+    const idle = { toolName: "go_back", toolInput: {} }
+    const { spy, of } = await drive([
+      idle,
+      idle,
+      idle,
+      idle,
+      idle,
+      { toolName: "record_finding", toolInput: { data: { a: "1" } } },
+      { toolName: "finish", toolInput: { outcome: "partial", summary: "Got nowhere." } },
+    ])
+    const stuck = (i: number) => observation(spy.requests[i]!).includes("You appear stuck")
+    // Turn 1 has nothing to compare against; turns 2-4 are the first three unproductive ones.
+    expect([stuck(0), stuck(1), stuck(2), stuck(3)]).toEqual([false, false, false, false])
+    expect(stuck(4)).toBe(true)
+    expect(observation(spy.requests[4]!)).toContain(
+      "You appear stuck (no page change or new findings for 4 turns). Reconsider your approach or ask_human.",
+    )
+    // Still stuck on turn 6 — the finding it records there has not happened yet at capture time.
+    expect(stuck(5)).toBe(true)
+    // Turn 7 sees the new finding: progress, so the note is gone.
+    expect(stuck(6)).toBe(false)
+    expect(of("done")[0]!.outcome).toBe("partial")
+  })
 })
 
 describe("the agent loop — budgets and bookkeeping", () => {
