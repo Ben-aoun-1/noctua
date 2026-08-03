@@ -26,14 +26,18 @@ export async function createBrowserPage(): Promise<BrowserPage> {
     args: ["--disable-dev-shm-usage", "--no-sandbox"],
   })
   const context = await browser.newContext({ viewport: VIEWPORT })
-  const page = await context.newPage()
   // tsx/esbuild compiles with `keepNames`, which rewrites every named function into a
   // `__name(fn, "fn")` call and defines that helper at the top of the *module*. `page.evaluate`
   // ships only the function's own source to the browser, so the helper is left behind and the
   // page throws `ReferenceError: __name is not defined` — which takes out `capture` entirely
-  // under `npm run dev`, though not under tsc's output or vitest's transform. This shim runs
-  // before any page script, in every frame, and makes those calls the no-ops they should be.
-  await page.addInitScript("globalThis.__name = (fn) => fn")
+  // under `npm run dev`, though not under tsc's output or vitest's transform. This shim makes
+  // those calls the no-ops they should be.
+  //
+  // It must be registered on the *context*, before the page exists: a page-level init script
+  // does not reach the initial about:blank document that `newPage` has already created, and
+  // that blank tab is exactly what every run captures on its first turn.
+  await context.addInitScript("globalThis.__name = (fn) => fn")
+  const page = await context.newPage()
   return {
     page,
     close: async () => {
