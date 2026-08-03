@@ -84,6 +84,20 @@ describe("buildReport", () => {
     expect(report.costUsd).toBe(0)
   })
 
+  it("carries the run's status, so a run still in the air is not read as a failed one", () => {
+    // No `done` yet, so the outcome is the pessimistic default — the status is what says why.
+    const flying = buildReport(GOAL, log({ type: "run_status", status: "running" }))
+    expect(flying.status).toBe("running")
+    expect(flying.outcome).toBe("failed")
+    expect(buildReport(GOAL, RUN).status).toBe("finished")
+    // A caller with better information wins: meta.json outlives a log that was cut off mid-write.
+    expect(buildReport(GOAL, RUN, "stopped").status).toBe("stopped")
+    // Nothing announced at all is a run that never started.
+    expect(buildReport(GOAL, log({ type: "done", outcome: "failed", summary: "x" })).status).toBe(
+      "pending",
+    )
+  })
+
   it("keeps the findings of a run that was stopped part-way", () => {
     const report = buildReport(
       GOAL,
@@ -129,6 +143,28 @@ describe("toMarkdown", () => {
     expect(md).toContain("3. **Step 3** ([screenshot](/shots/3.jpg))")
   })
 
+  it("keeps a summary that is itself markdown from taking the document over", () => {
+    const ended = log({
+      type: "done",
+      outcome: "failed",
+      summary: "## Findings\n| a | b |\n| --- | --- |",
+    })
+    const taken = toMarkdown(buildReport(GOAL, ended))
+    expect(taken).toContain("\\## Findings \\| a \\| b \\| \\| --- \\| --- \\|")
+    // One `## Findings` in the document, and it is the one this file wrote.
+    expect(taken.match(/^## Findings$/gm)).toHaveLength(1)
+  })
+
+  it("neutralises html and backticks in a cell", () => {
+    const nasty = log({
+      type: "finding",
+      data: { note: "<img src=x onerror=alert(1)> `rm -rf`" },
+      step: 1,
+    })
+    const md2 = toMarkdown(buildReport(GOAL, nasty))
+    expect(md2).toContain("| &lt;img src=x onerror=alert(1)&gt; \\`rm -rf\\` | 1 |")
+  })
+
   it("says so plainly when a run found nothing, rather than printing an empty table", () => {
     const ended = log({ type: "done", outcome: "failed", summary: "Nothing could be confirmed." })
     const bare = toMarkdown(buildReport(GOAL, ended))
@@ -163,6 +199,42 @@ describe("toCsv", () => {
 
   it("has nothing to say about a run with no findings", () => {
     expect(toCsv([])).toBe("")
+  })
+
+  it("leaves the step column out when no finding carries one", () => {
+    const rows2 = toCsv([{ a: "1" }, { b: "2" }]).split("\r\n")
+    expect(rows2[0]).toBe("a,b")
+    expect(rows2[1]).toBe("1,")
+  })
+
+  /**
+   * The rows come off pages the agent was pointed at, and land in a spreadsheet an accountant
+   * opens without thinking about it. A leading `=` there is code, not text.
+   */
+  it("defuses a value a spreadsheet would otherwise run as a formula", () => {
+    const rows2 = toCsv([
+      {
+        a: '=HYPERLINK("http://evil.example","click")',
+        b: "+1234",
+        c: "@cmd",
+        d: "-2+3",
+        step: 1,
+      },
+    ]).split("\r\n")
+    expect(rows2[1]).toBe(
+      `"'=HYPERLINK(""http://evil.example"",""click"")","'+1234","'@cmd","'-2+3",1`,
+    )
+  })
+
+  it("defuses a leading tab or carriage return too, which Excel skips past", () => {
+    expect(toCsv([{ a: "\t=1+1" }]).split("\r\n")[1]).toBe('"\'\t=1+1"')
+    expect(toCsv([{ a: "\r=1+1" }]).split("\r\n")[1]).toBe('"\'\r=1+1"')
+  })
+
+  it("leaves an ordinary value alone", () => {
+    expect(toCsv([{ a: "Glowbar Ltd", b: "3.50", c: "e=mc2" }]).split("\r\n")[1]).toBe(
+      "Glowbar Ltd,3.50,e=mc2",
+    )
   })
 })
 
@@ -202,11 +274,15 @@ function authed(app: FastifyInstance, opts: InjectOptions) {
   return app.inject({ ...opts, cookies: { [COOKIE]: CODE } })
 }
 
-/** A finished run as a restart finds it: a meta.json and an events.jsonl, and nothing in memory. */
+/** Two bytes that are unmistakably the start of a JPEG, standing in for a step's screenshot. */
+const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xdb])
+
+/** A finished run as a restart finds it: meta.json, events.jsonl and a shot, nothing in memory. */
 function seedDiskRun(events: PersistedEvent[] = RUN): string {
   const id = randomUUID()
   const dir = join(dataDir, "runs", id)
-  mkdirSync(dir, { recursive: true })
+  mkdirSync(join(dir, "shots"), { recursive: true })
+  writeFileSync(join(dir, "shots", "1.jpg"), JPEG)
   const meta: RunSummary = {
     id,
     goal: GOAL,
@@ -250,10 +326,12 @@ describe("export route, for a run only disk remembers", () => {
     )
     const body = res.json()
     expect(Object.keys(body).sort()).toEqual(
-      ["costUsd", "findings", "goal", "outcome", "steps", "summary"].sort(),
+      ["costUsd", "findings", "goal", "outcome", "status", "steps", "summary"].sort(),
     )
     expect(body.goal).toBe(GOAL)
     expect(body.outcome).toBe("success")
+    // Straight off meta.json, which is the only place a run this process never drove records it.
+    expect(body.status).toBe("finished")
     expect(body.costUsd).toBe(0.42)
     expect(body.findings).toHaveLength(2)
     expect(body.steps).toHaveLength(3)
@@ -318,6 +396,27 @@ describe("export route, for a run only disk remembers", () => {
     const id = seedDiskRun()
     const res = await app.inject({ method: "GET", url: exportUrl(id, "md") })
     expect(res.statusCode).toBe(401)
+  })
+
+  /** Without this, every screenshot link in a report exported after a restart is a broken image. */
+  it("serves the screenshots of a run only disk remembers", async () => {
+    const app = await newApp()
+    const id = seedDiskRun()
+    const res = await authed(app, { method: "GET", url: `/api/runs/${id}/shots/1.jpg` })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers["content-type"]).toContain("image/jpeg")
+    expect(res.rawPayload.subarray(0, 2)).toEqual(Buffer.from([0xff, 0xd8]))
+  })
+
+  it("refuses a missing shot, a traversal and an unknown run just as firmly off disk", async () => {
+    const app = await newApp()
+    const id = seedDiskRun()
+    for (const file of ["9.jpg", "..%2F..%2Fmeta.json", "..%2Fmeta.json", "..", "meta.json"]) {
+      const res = await authed(app, { method: "GET", url: `/api/runs/${id}/shots/${file}` })
+      expect(res.statusCode, file).toBe(404)
+    }
+    const url = `/api/runs/${randomUUID()}/shots/1.jpg`
+    expect((await authed(app, { method: "GET", url })).statusCode).toBe(404)
   })
 })
 
@@ -435,6 +534,7 @@ describe("export route, for a run this process is driving", () => {
     const body = res.json()
     expect(body.goal).toBe(GOAL)
     expect(body.outcome).toBe("success")
+    expect(body.status).toBe("finished")
     expect(body.costUsd).toBeGreaterThan(0)
     expect(body.findings).toEqual([{ company: "Glowbar Ltd", vat_valid: "true", step: 1 }])
   })

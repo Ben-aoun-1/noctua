@@ -1,4 +1,4 @@
-import type { PersistedEvent } from "../events/types.js"
+import type { PersistedEvent, RunStatus } from "../events/types.js"
 
 /**
  * The deliverable: a run's event log turned into something a person can read, file, or import.
@@ -28,6 +28,11 @@ export interface ReportStep {
 
 export interface Report {
   goal: string
+  /**
+   * Where the run itself stands. The `outcome` says how it *ended*, and defaults to `failed` when
+   * it has not — which a run still in the air would otherwise be indistinguishable from.
+   */
+  status: RunStatus
   outcome: string
   summary: string
   /** One row per `record_finding`: the model's own fields, plus the step it was recorded on. */
@@ -49,9 +54,19 @@ const STEP = "step"
 /** RFC 4180 says CRLF, and it is what Excel expects on every platform. */
 const CRLF = "\r\n"
 
-export function buildReport(goal: string, events: PersistedEvent[]): Report {
+/**
+ * `status` is the caller's answer to "where does this run stand" — `run.status` for a run this
+ * process is driving, `meta.json`'s for one it only found on disk. Left out, it is taken from the
+ * last `run_status` in the log, which is the same answer for every run whose log is intact.
+ */
+export function buildReport(
+  goal: string,
+  events: PersistedEvent[],
+  status?: RunStatus,
+): Report {
   let outcome = "failed"
   let summary = NO_ENDING
+  let announced: RunStatus | null = null
   let costUsd = 0
   const findings: Record<string, unknown>[] = []
   const steps = new Map<number, ReportStep>()
@@ -76,6 +91,9 @@ export function buildReport(goal: string, events: PersistedEvent[]): Report {
       case "done":
         outcome = event.outcome
         summary = event.summary
+        break
+      case "run_status":
+        announced = event.status
         break
       case "finding":
         // The step is written last on purpose: a model that put its own `step` field in the data
@@ -104,6 +122,9 @@ export function buildReport(goal: string, events: PersistedEvent[]): Report {
 
   return {
     goal,
+    // A log with no status at all belongs to a run that never got going: `pending` is what the
+    // store called it before the loop's first line.
+    status: status ?? announced ?? "pending",
     outcome,
     summary,
     findings,
@@ -117,11 +138,12 @@ export function toMarkdown(report: Report): string {
   const lines = [
     "# Noctua — run report",
     "",
-    `**Goal:** ${oneLine(report.goal)}`,
+    `**Goal:** ${prose(report.goal)}`,
     "",
-    `**Outcome:** ${oneLine(report.outcome)} · **Cost:** $${report.costUsd.toFixed(2)}`,
+    `**Outcome:** ${prose(report.outcome)} · **Status:** ${report.status} · ` +
+      `**Cost:** $${report.costUsd.toFixed(2)}`,
     "",
-    report.summary,
+    prose(report.summary),
     "",
     "## Findings",
     "",
@@ -167,11 +189,15 @@ export function toCsv(findings: Record<string, unknown>[]): string {
 /** Every key any finding carries, in the order first seen, with the step column last. */
 function columns(findings: Record<string, unknown>[]): string[] {
   const keys = new Set<string>()
-  for (const finding of findings) for (const key of Object.keys(finding)) keys.add(key)
+  let stepped = false
+  for (const finding of findings) {
+    for (const key of Object.keys(finding)) keys.add(key)
+    if (Object.hasOwn(finding, STEP)) stepped = true
+  }
   // Deleted and re-added rather than skipped: wherever a finding happened to carry it, the receipt
-  // belongs at the end of the row.
+  // belongs at the end of the row — and a caller whose rows have no steps gets no empty column.
   keys.delete(STEP)
-  return [...keys, STEP]
+  return stepped ? [...keys, STEP] : [...keys]
 }
 
 /** One value as text. A missing field is an empty cell — never the word "undefined". */
@@ -186,13 +212,43 @@ function tableRow(cells: string[]): string {
   return `| ${cells.join(" | ")} |`
 }
 
+/** What a value may not be left as, once it is quoted inside the document. */
+const MD_ESCAPES: Record<string, string> = {
+  "|": "\\|",
+  "<": "&lt;",
+  ">": "&gt;",
+  "`": "\\`",
+}
+
+/**
+ * Neutralises the characters that let a quoted value stop being a value.
+ *
+ * Nothing in a report is trusted with the structure of the document it lands in: the summary is
+ * the model's prose, and a finding is text read off a page that was chosen by the model. A pipe
+ * ends a table cell, a backtick opens code, and a `<` opens raw HTML — which every Markdown
+ * renderer worth the name will happily pass through into the page.
+ */
+function escapeMd(value: string): string {
+  return value.replace(/[|<>`]/g, (ch) => MD_ESCAPES[ch])
+}
+
+/**
+ * A value quoted in running text: one line, and opening no block of its own. The collapse takes
+ * care of a heading further in; the escape takes care of one at the very start, which is where a
+ * summary beginning `## Findings` would otherwise become a second Findings section.
+ */
+function prose(value: string): string {
+  return escapeMd(oneLine(value)).replace(/^([#*+-]|\d+\.)/, "\\$1")
+}
+
 /** A cell may hold neither a pipe nor a line break: either ends the row where it stands. */
 function escapeCell(value: string): string {
-  return value.replace(/\|/g, "\\|").replace(/\r\n|\r|\n/g, "<br>")
+  // The `<br>` goes in after the escaping, so it survives as markup while the value's own does not.
+  return escapeMd(value).replace(/\r\n|\r|\n/g, "<br>")
 }
 
 function stepLine(n: number, step: ReportStep): string {
-  const summary = step.summary === "" ? "" : ` — ${oneLine(step.summary)}`
+  const summary = step.summary === "" ? "" : ` — ${prose(step.summary)}`
   const shot = step.shotUrl === null ? "" : ` ([screenshot](${step.shotUrl}))`
   return `${n}. **Step ${step.step}**${summary}${shot}`
 }
@@ -202,6 +258,19 @@ function oneLine(value: string): string {
   return value.replace(/\s+/g, " ").trim()
 }
 
+/**
+ * What Excel, Sheets and LibreOffice read as the start of a formula rather than of a value. The
+ * tab and the carriage return are in the list because they are skipped over before the check.
+ */
+const FORMULA_LEAD = /^[=+\-@\t\r]/
+
 function csvField(value: string): string {
-  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value
+  // A field that opens a formula is defused with a leading apostrophe — the spreadsheet convention
+  // for "the rest of this is text", which it consumes rather than displays. Without it, a finding
+  // read off a page the model was pointed at is code that runs when an accountant opens the file
+  // (CWE-1236). The cost is that a negative number arrives as text, which is the right way round:
+  // a wrong-looking cell is noticed, a formula that ran is not.
+  const defused = FORMULA_LEAD.test(value) ? `'${value}` : value
+  if (defused === value && !/[",\r\n]/.test(value)) return value
+  return `"${defused.replace(/"/g, '""')}"`
 }

@@ -6,7 +6,7 @@ import type { LLMFactory } from "../agent/llm.js"
 import { runAgent } from "../agent/loop.js"
 import { config } from "../config.js"
 import { RunEventLog } from "../events/log.js"
-import type { PersistedEvent } from "../events/types.js"
+import type { PersistedEvent, RunStatus } from "../events/types.js"
 import { buildReport, toCsv, toMarkdown, type Report } from "../exports/report.js"
 import type { RunControl } from "../runs/control.js"
 import {
@@ -101,9 +101,10 @@ interface RunParams {
   id: string
 }
 
-/** A run's goal and its whole log, wherever they were found. */
+/** A run's goal, where it stands, and its whole log — wherever the three were found. */
 interface ExportSource {
   goal: string
+  status: RunStatus
   events: PersistedEvent[]
 }
 
@@ -257,7 +258,7 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiOpts): Promise<vo
       const source = loadForExport(store, dataDir, req.params.id)
       if (!source) return reply.code(404).send({ error: "unknown run" })
 
-      const report = buildReport(source.goal, source.events)
+      const report = buildReport(source.goal, source.events, source.status)
       // Enough of the id to tell one download from another in a folder of them, and short enough
       // to stay readable. The id is known to be a run id by now, so nothing can escape the quotes.
       const filename = `noctua-${req.params.id.slice(0, 8)}.${format.ext}`
@@ -268,14 +269,15 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiOpts): Promise<vo
     },
   )
 
+  /** Served for a run found on disk as well as a live one: an exported report links straight here. */
   app.get<{ Params: RunParams & { file: string } }>(
     "/api/runs/:id/shots/:file",
     async (req, reply) => {
-      const run = store.get(req.params.id)
-      if (!run) return reply.code(404).send({ error: "unknown run" })
+      const dir = shotsDir(store, dataDir, req.params.id)
+      if (!dir) return reply.code(404).send({ error: "unknown run" })
       const file = basename(req.params.file)
       if (!SHOT_NAME.test(file)) return reply.code(404).send({ error: "no such screenshot" })
-      const path = join(run.log.dir, "shots", file)
+      const path = join(dir, file)
       if (!existsSync(path)) return reply.code(404).send({ error: "no such screenshot" })
       return reply.type("image/jpeg").send(createReadStream(path))
     },
@@ -298,10 +300,26 @@ function readFormat(value: unknown): (typeof FORMATS)[ExportFormat] | null {
  */
 function loadForExport(store: RunStore, dataDir: string, id: string): ExportSource | null {
   const live = store.get(id)
-  if (live) return { goal: live.goal, events: live.log.readAll() }
+  if (live) return { goal: live.goal, status: live.status, events: live.log.readAll() }
   const meta = diskMeta(store, id)
   if (!meta) return null
-  return { goal: meta.goal, events: new RunEventLog(id, dataDir).readAll() }
+  return {
+    goal: meta.goal,
+    status: meta.status,
+    events: new RunEventLog(id, dataDir).readAll(),
+  }
+}
+
+/**
+ * Where a run's screenshots are, whether or not this process is driving it.
+ *
+ * A finished run's shots are what its exported report links to, so they have to outlive the
+ * process as the report does. This is a path, not a log: nothing is opened or created here.
+ */
+function shotsDir(store: RunStore, dataDir: string, id: string): string | null {
+  const live = store.get(id)
+  if (live) return join(live.log.dir, "shots")
+  return diskMeta(store, id) ? join(dataDir, "runs", id, "shots") : null
 }
 
 /** The log file of a finished run this process never drove, reopened to be replayed and no more. */
