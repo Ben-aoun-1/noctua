@@ -106,11 +106,19 @@
    * shadow. `min-height: 0` is not decoration — a flex child defaults to `min-height: auto`, which
    * refuses to shrink below its content, and a pane that will not shrink is a pane whose own
    * scrollbar never appears and whose overflow pushes the sticky control bar off the screen.
+   *
+   * `min-width: 0` is the same rule on the other axis, and it is what keeps the cockpit inside a
+   * phone. A grid item's automatic minimum is its *content's* minimum, and the findings table's is
+   * the width of its widest row — so a single-column grid on a 390px screen was sizing its column
+   * to 471px and scrolling the whole page sideways, panes and header and all. Released, the column
+   * takes the screen's width and the table scrolls inside its own pane, which is where the
+   * `overflow-x-auto` around it always meant it to.
    */
   .pane {
     display: flex;
     flex-direction: column;
     min-height: 0;
+    min-width: 0;
     border-radius: 4px;
     border: 1px solid color-mix(in oklab, var(--ink) 10%, transparent);
     background-color: var(--cream);

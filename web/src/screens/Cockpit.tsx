@@ -180,6 +180,7 @@ export default function Cockpit({ id }: { id: string }) {
           runId={id}
           findings={view.findings}
           done={view.done}
+          over={over}
           openStep={receiptStep}
           onToggleReceipt={(step) => setReceiptStep((open) => (open === step ? null : step))}
           shotFor={(step) => view.shots.get(step) ?? null}

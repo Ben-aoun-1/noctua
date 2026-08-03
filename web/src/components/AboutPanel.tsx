@@ -13,6 +13,11 @@ import { useEffect, useRef } from "react"
  * from reading it on a marketing page.
  */
 
+/** Everything Tab would stop on inside the panel, in document order. */
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
+  'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
 interface Section {
   head: string
   body: string
@@ -40,10 +45,10 @@ const SECTIONS: Section[] = [
     head: "RECEIPTS",
     body:
       "Every number in the findings table carries a receipt. The small chip at the end of a row is " +
-      "the step the fact was read on; click it and you get the page exactly as it looked at that " +
-      "moment, with the address underneath. Nothing here is asserted from memory. If Noctua could " +
-      "not show you where a figure came from, the figure would not be in the table — which is the " +
-      "difference between an answer you have to trust and one you can check.",
+      "the step the fact was read on; click it and you get the address it was read from, and the " +
+      "page exactly as it looked at that moment. Where a finding recorded no source, the receipt " +
+      "says so rather than covering for it. Either way you are told where a figure came from, " +
+      "which is the difference between an answer you have to trust and one you can check.",
   },
   {
     head: "STEERING IT",
@@ -58,10 +63,11 @@ const SECTIONS: Section[] = [
     head: "THE GUARDRAILS",
     body:
       "It never types a password, an API key or a card number, even if it is handed one — a login " +
-      "wall is a question for you, not an obstacle to work around. Anything that submits a form " +
-      "waits for your approval, in autopilot as well. Every run carries a hard ceiling on steps, on " +
-      "cost and on minutes, and stops when one is reached. Addresses on private networks are refused " +
-      "before a tab is opened.",
+      "wall is a question for you, not an obstacle to work around. Filling in a field and pressing " +
+      "Enter to submit it stops for your approval even in autopilot, and approve-each-step gates " +
+      "every action there is. Every run carries a hard ceiling on steps, on cost and on minutes, " +
+      "and stops when one is reached. Addresses on private networks are refused before a tab is " +
+      "opened.",
   },
   {
     head: "WHEN IT GETS STUCK",
@@ -97,11 +103,43 @@ export default function AboutPanel({ onClose }: { onClose: () => void }) {
     panelRef.current?.focus()
   }, [])
 
-  // On the window rather than on the panel: focus can legitimately be inside it, on the backdrop's
-  // dead space, or nowhere at all after a click on the body, and Escape must close it in all three.
+  /**
+   * Escape, and the loop that keeps Tab inside the panel.
+   *
+   * On the window rather than on the panel, because focus can legitimately be inside it, on the
+   * backdrop's dead space, or nowhere at all after a click on the body — and both of these have to
+   * work in all three cases. The trap is what earns `aria-modal`: a screen reader is being told the
+   * rest of the page is inert, and Tab must not then walk straight out into it. It is also what
+   * keeps the cockpit's own keyboard shortcuts out of reach while this is open.
+   */
   useEffect(() => {
     function onKey(event: KeyboardEvent): void {
-      if (event.key === "Escape") onClose()
+      const panel = panelRef.current
+      if (panel === null) return
+
+      if (event.key === "Escape") {
+        onClose()
+        return
+      }
+      if (event.key !== "Tab") return
+
+      const stops = panel.querySelectorAll<HTMLElement>(FOCUSABLE)
+      const active = document.activeElement
+      const outside = !(active instanceof Node) || !panel.contains(active)
+      // The prose carries no links, so this can legitimately be the close button alone — and a
+      // panel with nothing tabbable in it at all still must not hand Tab to the page behind.
+      if (stops.length === 0) {
+        event.preventDefault()
+        panel.focus()
+        return
+      }
+
+      const first = stops[0]
+      const last = stops[stops.length - 1]
+      if (event.shiftKey ? outside || active === first || active === panel : outside || active === last) {
+        event.preventDefault()
+        ;(event.shiftKey ? last : first).focus()
+      }
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)

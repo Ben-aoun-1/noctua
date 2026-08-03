@@ -71,6 +71,16 @@ export interface FindingsPaneProps {
   findings: Finding[]
   /** The run's ending, once there is one; the pane becomes the report at that point. */
   done: { outcome: DoneOutcome; summary: string } | null
+  /**
+   * Whether the run itself is over — which is not the same question as whether `done` is in view.
+   *
+   * The rest of this pane is a claim about the log at the moment being shown, and scrubbing back
+   * into a finished run must take the summary and the outcome chip away with it: at event 9 the run
+   * genuinely had not ended. An export is not a claim about that moment. It is a file of the whole
+   * run, built by the server from the whole log, and the cursor has no bearing on it — so the links
+   * are held by the run being over and stay put wherever the dial happens to be.
+   */
+  over: boolean
   /** The receipt currently open, or null. Shared with the live view, which pins to the same step. */
   openStep: number | null
   onToggleReceipt: (step: number) => void
@@ -82,6 +92,7 @@ export default function FindingsPane({
   runId,
   findings,
   done,
+  over,
   openStep,
   onToggleReceipt,
   shotFor,
@@ -144,7 +155,7 @@ export default function FindingsPane({
         )}
       </div>
 
-      {done && (
+      {over && (
         <div className="hairline mt-3 flex flex-wrap gap-2 border-t pt-3">
           {EXPORTS.map((format) => (
             <a

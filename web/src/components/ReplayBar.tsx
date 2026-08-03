@@ -54,6 +54,7 @@ export default function ReplayBar({ maxSeq, cursor, step, onSeek, onEnd }: Repla
    */
   const [completed, setCompleted] = useState(false)
   const rangeRef = useRef<HTMLInputElement>(null)
+  const barRef = useRef<HTMLDivElement>(null)
 
   // One timeout per tick, re-armed from the cursor it just moved. Cancelled by pausing, by the run
   // reaching its end, and by any seek — including one the human made mid-playback.
@@ -88,13 +89,19 @@ export default function ReplayBar({ maxSeq, cursor, step, onSeek, onEnd }: Repla
   }
 
   /**
-   * The two keys a tape deserves, scoped so they cannot be taken from anyone typing.
+   * The two keys a tape deserves, scoped so they can only ever be taken from someone reaching for
+   * the tape.
    *
-   * On `window` rather than on the bar, because the useful moment for them is while reading the
-   * reasoning column — a shortcut that first demands you go and click the scrubber is a shortcut
-   * nobody uses. Three things keep their own keys: any field being typed into, the slider itself
-   * (whose native arrow handling already moves the cursor, and would otherwise move it twice), and
-   * buttons and links, for which the browser turns Space into a click of its own.
+   * Space is the page-down key. A bar that swallowed it everywhere would break scrolling on every
+   * screen narrower than `lg` — where the cockpit is a tall single column — in exchange for a
+   * shortcut nobody asked for. So the handler is live only while the bar has the focus or the
+   * pointer: both are read from the DOM at the keystroke rather than mirrored into state, so there
+   * is no hover flag to get stuck on a bar the mouse has left.
+   *
+   * On `window` rather than on the bar even so, because the hover half of that has to work with
+   * focus somewhere else entirely. Three things inside the bar keep their own keys: any field being
+   * typed into, the slider itself (whose native arrow handling already moves the cursor, and would
+   * otherwise move it twice), and buttons and links, for which the browser turns Space into a click.
    *
    * Re-bound on every render on purpose: the handler closes over the cursor and over whether the
    * tape is running, both of which change constantly, and one `addEventListener` per render is not
@@ -105,9 +112,15 @@ export default function ReplayBar({ maxSeq, cursor, step, onSeek, onEnd }: Repla
       if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
       const target = event.target
       const el = target instanceof HTMLElement ? target : null
+      const bar = barRef.current
+      if (bar === null) return
       // A dialog open over the cockpit owns its own keys: Space scrolls the About panel rather
       // than starting the tape running underneath it.
       if (el?.closest("[role='dialog']")) return
+      const reached =
+        (document.activeElement instanceof Node && bar.contains(document.activeElement)) ||
+        bar.matches(":hover")
+      if (!reached) return
 
       if (event.key === " ") {
         if (typing(el) || el?.tagName === "BUTTON" || el?.tagName === "A") return
@@ -127,7 +140,7 @@ export default function ReplayBar({ maxSeq, cursor, step, onSeek, onEnd }: Repla
   })
 
   return (
-    <div className="hairline border-t bg-ivory/95 backdrop-blur" data-testid="replay-bar">
+    <div ref={barRef} className="hairline border-t bg-ivory/95 backdrop-blur" data-testid="replay-bar">
       <div className="mx-auto flex w-full max-w-[1600px] flex-wrap items-center gap-x-4 gap-y-2 px-5 py-2 sm:px-8">
         <p className="microlabel shrink-0 max-sm:hidden">REPLAY</p>
 
@@ -161,9 +174,15 @@ export default function ReplayBar({ maxSeq, cursor, step, onSeek, onEnd }: Repla
           EVENT {cursor} / {maxSeq} · STEP {step === null ? "—" : String(step).padStart(2, "0")}
         </span>
 
-        {/* Always rendered: a label that appears when the tape runs out must not shove the button
-            beside it sideways at the exact moment someone is reaching for it. */}
-        <span className="microlabel shrink-0 text-right sm:w-[128px]" data-testid="replay-state">
+        {/* Always rendered, and a live region for the same reason: a label that appears when the
+            tape runs out must not shove the button beside it sideways at the exact moment someone
+            is reaching for it — and an empty region that is already in the tree is the one a
+            screen reader will actually announce when it fills. */}
+        <span
+          role="status"
+          className="microlabel shrink-0 text-right sm:w-[128px]"
+          data-testid="replay-state"
+        >
           {completed ? "REPLAY COMPLETE" : ""}
         </span>
 
