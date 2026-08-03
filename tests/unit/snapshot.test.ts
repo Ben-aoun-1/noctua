@@ -57,6 +57,55 @@ describe("snapshot", () => {
     expect(select.name.length).toBeLessThanOrEqual(80)
   })
 
+  it("keeps a long option list inside the name cap and says how many it hid", async () => {
+    await bp.page.goto(fx.baseUrl + "/registry.html")
+    const snap = await capture(bp.page)
+    const country = snap.elements.find((e) => e.name.startsWith("country"))!
+    const all = await bp.page.$$eval("#country option", (options) =>
+      options.map((option) => option.textContent!.trim()),
+    )
+    expect(all).toHaveLength(27)
+
+    expect(country.name.length).toBeLessThanOrEqual(80)
+    const marker = country.name.match(/…\(\+(\d+) more\)$/)
+    expect(marker, `expected a "+N more" marker in ${JSON.stringify(country.name)}`).not.toBeNull()
+
+    // Every label the model is shown must be a whole one — a half-spelled country is worse than
+    // no country, because the model would then try to select it.
+    const shown = country.name
+      .slice("country — options: ".length)
+      .replace(/\|?…\(\+\d+ more\)$/, "")
+      .split("|")
+      .filter((label) => label !== "")
+    expect(shown.length).toBeGreaterThan(0)
+    for (const label of shown) expect(all).toContain(label)
+    expect(shown.length + Number(marker![1])).toBe(all.length)
+  })
+
+  it("advertises an option by the label playwright will match, not its text", async () => {
+    await bp.page.goto(fx.baseUrl + "/registry.html")
+    const snap = await capture(bp.page)
+    const filing = snap.elements.find((e) => e.name.startsWith("filing"))!
+    // The option reads "AR — B1" on screen but carries label="Annual return (B1)".
+    expect(filing.name).toBe("filing — options: Annual return (B1)|Confirmation statement")
+  })
+
+  it("admits when the listing was cut off at the element cap", async () => {
+    await bp.page.goto(fx.baseUrl + "/crowded.html")
+    const snap = await capture(bp.page)
+    expect(snap.elements).toHaveLength(120)
+    expect(snap.truncated).toBe(true)
+    const lines = snapshotText(snap).split("\n")
+    expect(lines[lines.length - 1]).toBe("(listing truncated at 120 elements)")
+  })
+
+  it("says nothing about truncation on a page that fits", async () => {
+    await bp.page.goto(fx.baseUrl + "/registry.html")
+    const snap = await capture(bp.page)
+    expect(snap.truncated).toBe(false)
+    expect(snapshotText(snap)).not.toContain("truncated")
+  })
+
   it("renders URL, TITLE and one line per element", async () => {
     await bp.page.goto(fx.baseUrl + "/index.html")
     const snap = await capture(bp.page)

@@ -25,6 +25,36 @@
       <button type="submit">Search</button>
     </form>
 
+    <h2>Filters</h2>
+    <p>
+      <label for="country">Country</label>
+      <!-- Stands in for the VIES member-state picker: far more options than one element name holds. -->
+      <select id="country" name="country"></select>
+
+      <label for="filing">Filing</label>
+      <!-- The first option's `label` attribute differs from its text, as some real registries do:
+           Playwright selects by `option.label`, so that is what the listing must advertise. -->
+      <select id="filing" name="filing">
+        <option value="ar" label="Annual return (B1)">AR — B1</option>
+        <option value="cs">Confirmation statement</option>
+      </select>
+    </p>
+    <script>
+      const COUNTRIES = [
+        "Austria", "Belgium", "Bulgaria", "Croatia", "Cyprus", "Czechia", "Denmark", "Estonia",
+        "Finland", "France", "Germany", "Greece", "Hungary", "Ireland", "Italy", "Latvia",
+        "Lithuania", "Luxembourg", "Malta", "Netherlands", "Poland", "Portugal", "Romania",
+        "Slovakia", "Slovenia", "Spain", "Sweden",
+      ]
+      const country = document.querySelector("#country")
+      for (const name of COUNTRIES) {
+        const option = document.createElement("option")
+        option.value = name.slice(0, 2).toUpperCase()
+        option.textContent = name
+        country.append(option)
+      }
+    </script>
+
     <h2>Recently viewed</h2>
     <ul>
       <li><a href="company.html?q=Glowbar">Glowbar Ltd</a></li>

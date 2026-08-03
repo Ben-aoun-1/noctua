@@ -50,6 +50,8 @@ const LABEL_TIMEOUT_MS = 2_000
  * before it learns which choices exist.
  */
 const SELECT_MATCH_TIMEOUT_MS = 3_000
+/** Enough choices to re-aim with; a member-state list in full would swamp the observation. */
+const MAX_ERROR_OPTIONS = 15
 /** Roughly one viewport-ish nudge: enough to reveal new content, small enough not to skip past it. */
 const SCROLL_PIXELS = 600
 /** Long enough for a wheel event to be applied; spent in full only when the page cannot move. */
@@ -313,15 +315,30 @@ async function selectOption(args: Record<string, unknown>, ctx: ToolCtx): Promis
   return { summary: `selected ${JSON.stringify(option)} in [${ref}]` }
 }
 
-/** Turns "that option does not exist" into a message the model can act on next turn. */
+/**
+ * Turns "that option does not exist" into a message the model can act on next turn.
+ *
+ * Labels come from `option.label` — the label attribute where there is one, the option's text
+ * otherwise — which is what Playwright's own matcher compares against, so every choice offered
+ * here is one `select_option` would accept. A country picker's full list would be several
+ * kilobytes of observation, so the tail is counted rather than printed.
+ */
 async function noSuchOption(element: Locator, ref: number, option: string): Promise<string> {
-  const labels = (await element.locator("option").allTextContents().catch(() => []))
+  const labels = (
+    await element
+      .locator("option")
+      .evaluateAll((options) => options.map((o) => (o as HTMLOptionElement).label))
+      .catch(() => [] as string[])
+  )
     .map((label) => label.replace(/\s+/g, " ").trim())
     .filter((label) => label !== "")
   if (labels.length === 0) {
     return `[${ref}] is not a dropdown, or has no options to choose from`
   }
-  return `no option ${JSON.stringify(option)} in [${ref}] — the choices are: ${labels.join(" | ")}`
+  const shown = labels.slice(0, MAX_ERROR_OPTIONS)
+  const hidden = labels.length - shown.length
+  const choices = hidden === 0 ? shown.join(" | ") : `${shown.join(" | ")} … and ${hidden} more`
+  return `no option ${JSON.stringify(option)} in [${ref}] — the choices are: ${choices}`
 }
 
 async function scroll(args: Record<string, unknown>, ctx: ToolCtx): Promise<ToolOutcome> {

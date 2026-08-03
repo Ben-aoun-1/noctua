@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Fixture Registry — All Filings</title>
+    <style>
+      body { font: 14px/1.4 system-ui, sans-serif; margin: 2rem; color: #111; }
+      li { margin: 0.1rem 0; }
+    </style>
+  </head>
+  <body>
+    <h1>All filings</h1>
+    <!-- More interactive elements than a single listing is allowed to offer, so the snapshot
+         has to truncate — and say that it did. -->
+    <ul id="filings"></ul>
+    <script>
+      const list = document.querySelector("#filings")
+      for (let i = 1; i <= 150; i++) {
+        const item = document.createElement("li")
+        const link = document.createElement("a")
+        link.href = "company.html?q=Filing" + i
+        link.textContent = "Filing " + i
+        item.append(link)
+        list.append(item)
+      }
+    </script>
+  </body>
+</html>

@@ -79,6 +79,13 @@ describe("buildSystemPrompt — shared contract", () => {
     expect(p).not.toMatch(/scroll or navigate to a page that has it/)
   })
 
+  // "Not listed means not on the page" is false when the listing hit its element cap.
+  it.each(PRESETS)("allows for a truncated listing (%s)", (preset) => {
+    const p = buildSystemPrompt(preset)
+    expect(p).toContain("(listing truncated at 120 elements)")
+    expect(p).toMatch(/unless the listing says it was truncated/i)
+  })
+
   it.each(PRESETS)("reserves wait for a page that is still rendering (%s)", (preset) => {
     const p = buildSystemPrompt(preset)
     expect(p).toMatch(/still loading or rendering/i)

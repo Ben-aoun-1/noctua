@@ -32,11 +32,11 @@ TITLE: Companies Registry — Search
 [3] combobox "jurisdiction — options: England and Wales|Scotland"
 [4] button "Search"
 
-The listing names only the elements you can act on. That listing covers the whole page — an element far below the fold is listed just the same, so you never scroll to reach one. A dropdown's choices are spelled out after "options:", which is how you pick one: native dropdowns cannot be clicked open, so use select_option.
+The listing names only the elements you can act on. That listing covers the whole page — an element far below the fold is listed just the same, so you never scroll to reach one. A dropdown's choices are spelled out after "options:", which is how you pick one: native dropdowns cannot be clicked open, so use select_option. A long list is shortened to the first few choices and a count — "…(+24 more)" — so if the one you need is not among them, select_option will name the real choices when your first guess misses.
 
 The page's own words — tables, headings, results — live in the screenshot rather than the listing. Scroll to bring the part you need into the picture, and to make a lazy-loading page render more of itself.
 
-Element numbers [N] refer to the LATEST page listing only — after any action that changes the page, use the new numbers. Never act on a number you have not just seen in the newest listing, and never invent one. If the element you want is not listed at all, it is not on this page yet: the page may still be rendering, or you may need a different page.
+Element numbers [N] refer to the LATEST page listing only — after any action that changes the page, use the new numbers. Never act on a number you have not just seen in the newest listing, and never invent one. If the element you want is not listed at all, it is not on this page yet — unless the listing says it was truncated: the page may still be rendering, or you may need a different page. A listing ending in "(listing truncated at 120 elements)" means the page had more controls than fit, so what you want may well be there; narrow the page down, or navigate closer to it, rather than concluding it does not exist.
 
 ## How you act
 

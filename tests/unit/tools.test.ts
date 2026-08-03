@@ -280,6 +280,36 @@ describe("executeTool", () => {
     expect(await ctx.page.inputValue("select[name=jurisdiction]")).toBe("ew")
   })
 
+  it("caps the option list in the error rather than pasting a whole country list", async () => {
+    await executeTool("navigate", { url: fx.baseUrl + "/registry.html" }, ctx)
+    const country = (await capture(ctx.page)).elements.find((e) => e.name.startsWith("country"))!
+
+    const failure = await executeTool(
+      "select_option",
+      { ref: country.ref, option: "Atlantis", why: "guessing at the member state" },
+      ctx,
+    ).catch((err: Error) => err)
+
+    expect(failure).toBeInstanceOf(Error)
+    const message = (failure as Error).message
+    expect(message).toContain("Austria")
+    expect(message).toMatch(/… and 12 more$/) // 27 options, 15 shown
+    expect(message.length).toBeLessThan(400)
+  })
+
+  it("selects an option by its label attribute, which is what the listing showed", async () => {
+    await executeTool("navigate", { url: fx.baseUrl + "/registry.html" }, ctx)
+    const filing = (await capture(ctx.page)).elements.find((e) => e.name.startsWith("filing"))!
+
+    const out = await executeTool(
+      "select_option",
+      { ref: filing.ref, option: "Annual return (B1)", why: "the client files a B1" },
+      ctx,
+    )
+    expect(out.summary).toBe(`selected "Annual return (B1)" in [${filing.ref}]`)
+    expect(await ctx.page.inputValue("select[name=filing]")).toBe("ar")
+  })
+
   it("goes back to the previous page", async () => {
     await executeTool("navigate", { url: fx.baseUrl + "/registry.html" }, ctx)
     await executeTool("navigate", { url: fx.baseUrl + "/company.html" }, ctx)
