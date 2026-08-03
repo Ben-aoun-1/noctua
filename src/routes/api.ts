@@ -7,7 +7,7 @@ import { runAgent } from "../agent/loop.js"
 import { config } from "../config.js"
 import type { PersistedEvent } from "../events/types.js"
 import type { RunControl } from "../runs/control.js"
-import { RunStore, type Run } from "../runs/store.js"
+import { RunStore, RUN_PRESETS, type RunPreset } from "../runs/store.js"
 
 /**
  * Everything the browser talks to: one access code, one way to start a run, one stream to watch it
@@ -45,8 +45,6 @@ const MAX_ANSWER_CHARS = 2000
  */
 const SHOT_NAME = /^[\w.-]+\.jpg$/
 
-const PRESETS: readonly string[] = ["vendor", "compliance"]
-
 export interface ApiOpts {
   llmFactory: LLMFactory
 }
@@ -69,14 +67,15 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiOpts): Promise<vo
   app.post("/api/auth", async (req, reply) => {
     const code = readString(asObject(req.body).code)
     if (!codeMatches(code)) return reply.code(401).send({ error: "wrong access code" })
-    // No `secure` flag: the operator may reach this over plain http (a tunnel, an IP, a staging
-    // box), and a cookie the browser silently refuses to send locks them out of their own runs.
-    // Confidentiality is the deployment's job — the code travels in this request body either way.
+    // `secure` in production, where the deployment terminates TLS, and not on a laptop reached
+    // over plain http — there a cookie the browser silently refuses to send would lock the
+    // operator out of their own runs with no visible reason why.
     reply.setCookie(COOKIE, config.accessCode, {
       httpOnly: true,
       sameSite: "lax",
       path: "/",
       maxAge: COOKIE_MAX_AGE_S,
+      secure: process.env.NODE_ENV === "production",
     })
     return { ok: true }
   })
@@ -91,7 +90,7 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiOpts): Promise<vo
     }
     const preset = readPreset(body.preset)
     if (preset === undefined) {
-      return reply.code(400).send({ error: `preset must be ${PRESETS.join(", ")} or null` })
+      return reply.code(400).send({ error: `preset must be ${RUN_PRESETS.join(", ")} or null` })
     }
     // Both caps are about this machine, not this user: chromium instances are the scarce thing,
     // and the day's spend is money already gone.
@@ -106,9 +105,18 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiOpts): Promise<vo
     // `pending` run in the history that nothing is ever going to drive.
     const llm = opts.llmFactory()
     const run = store.create(goal, preset)
-    // Fire and forget: `runAgent` never throws, drives the run to a terminal state on its own, and
-    // reports everything it does through the event log this response's caller is about to open.
-    void runAgent(run, llm)
+    // Fire and forget: `runAgent` drives the run to a terminal state on its own and reports what it
+    // does through the event log this response's caller is about to open.
+    //
+    // It handles its own failures — but only from inside its try block, and its first status write
+    // happens before that. An unwritable data directory would therefore reject a promise nobody is
+    // awaiting, which in Node means the whole server dies with it. This catch is that floor: the
+    // run is already lost, and marking it terminal in memory at least stops it holding a
+    // concurrency slot for ever. Nothing is appended or persisted here — the log is what failed.
+    void runAgent(run, llm).catch((err: unknown) => {
+      run.status = "failed"
+      console.error(`run ${run.id} died before the loop could report it:`, err)
+    })
     return reply.code(201).send({ id: run.id })
   })
 
@@ -129,6 +137,8 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiOpts): Promise<vo
       // nginx buffers proxied responses by default, which holds a run's events back until the
       // buffer fills — the whole point of this route is that it does not.
       "x-accel-buffering": "no",
+      // Hijacked, so the app-wide onSend hook never sees this reply; set it here as well.
+      "x-content-type-options": "nosniff",
     })
     reply.raw.flushHeaders()
 
@@ -146,6 +156,10 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiOpts): Promise<vo
     // A watcher closing a tab must not leave a subscriber writing into a dead socket for ever.
     reply.raw.on("close", stop)
     reply.raw.on("error", stop)
+    // A client that hung up while the replay was being written has already fired `close`, and
+    // would never fire it again: the handlers above would be registered onto a dead socket and
+    // the heartbeat and the subscription would outlive the connection.
+    if (reply.raw.destroyed) stop()
   })
 
   app.post<{ Params: RunParams }>("/api/runs/:id/control", async (req, reply) => {
@@ -265,8 +279,8 @@ function readBoundedText(value: unknown, maxChars: number): string | null {
 }
 
 /** The preset, or `undefined` for "not a preset" — `null` is itself a valid answer (free-form). */
-function readPreset(value: unknown): Run["preset"] | undefined {
+function readPreset(value: unknown): RunPreset | undefined {
   if (value === undefined || value === null || value === "") return null
-  if (typeof value === "string" && PRESETS.includes(value)) return value as Run["preset"]
-  return undefined
+  const named = RUN_PRESETS.find((preset) => preset === value)
+  return named ?? undefined
 }

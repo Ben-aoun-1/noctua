@@ -3,12 +3,28 @@ import { config } from "./config.js"
 import { buildServer } from "./server.js"
 
 /**
+ * Short enough to type on a phone, long enough that guessing it over HTTP is hopeless. Nothing
+ * throttles attempts, so length is the whole defence.
+ */
+const MIN_ACCESS_CODE_CHARS = 12
+
+/**
  * The access code is the only thing between the internet and a browser agent that spends money.
  * `config` falls back to a code that is published in this repository, which is fine on a laptop
- * and unacceptable on a public host.
+ * and unacceptable on a public host — so a production boot without a real one fails here, loudly,
+ * rather than coming up unlocked.
  */
-if (process.env.NODE_ENV === "production" && !process.env.ACCESS_CODE) {
-  throw new Error("ACCESS_CODE must be set in production — the built-in default code is public")
+if (process.env.NODE_ENV === "production") {
+  const code = process.env.ACCESS_CODE ?? ""
+  if (code === "") {
+    throw new Error("ACCESS_CODE must be set in production — the built-in default code is public")
+  }
+  if (code.length < MIN_ACCESS_CODE_CHARS) {
+    throw new Error(
+      `ACCESS_CODE must be at least ${MIN_ACCESS_CODE_CHARS} characters in production — ` +
+        `it is the only thing guarding a browser agent that spends money, and nothing rate-limits guesses`,
+    )
+  }
 }
 
 /**

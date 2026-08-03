@@ -32,6 +32,13 @@ export async function buildServer(opts: ServerOpts = {}): Promise<FastifyInstanc
   const app = Fastify({ logger: false })
   await app.register(cookie)
 
+  // Registered on the root instance, before any route, so it reaches every reply the server sends:
+  // the API's JSON, the screenshots, and the built app. A run's screenshots are bytes a model chose
+  // to point the browser at — nothing downstream should be guessing at what they are.
+  app.addHook("onSend", async (_req, reply) => {
+    reply.header("x-content-type-options", "nosniff")
+  })
+
   // Open on purpose: a deploy's health probe has no cookie, and this says nothing about any run.
   app.get("/healthz", async () => ({ ok: true, name: "noctua" }))
 

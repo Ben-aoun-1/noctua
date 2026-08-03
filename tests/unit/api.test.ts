@@ -14,6 +14,7 @@ import {
   type TurnResult,
 } from "../../src/agent/llm.js"
 import { config } from "../../src/config.js"
+import { RunEventLog } from "../../src/events/log.js"
 import type { PersistedEvent } from "../../src/events/types.js"
 import type { RunSummary } from "../../src/runs/store.js"
 import { buildServer } from "../../src/server.js"
@@ -107,6 +108,20 @@ interface Frame {
   id: string | null
   event: string | null
   data: PersistedEvent | null
+}
+
+/** Opens an event stream against a listening server, with the access cookie already on it. */
+async function openSse(
+  base: string,
+  path: string,
+  headers: Record<string, string> = {},
+): Promise<SseClient> {
+  const ac = new AbortController()
+  const res = await fetch(`${base}${path}`, {
+    headers: { cookie: `${COOKIE}=${CODE}`, ...headers },
+    signal: ac.signal,
+  })
+  return new SseClient(res, ac)
 }
 
 /** Minimal SSE reader: frames in, plus the one question a test cannot ask twice — is it still open? */
@@ -218,6 +233,19 @@ describe("api auth", () => {
     expect(res.statusCode).toBe(401)
   })
 
+  it("marks the cookie secure only where there is TLS to be had", async () => {
+    const app = await newApp()
+    const before = process.env.NODE_ENV
+    process.env.NODE_ENV = "production"
+    try {
+      const res = await app.inject({ method: "POST", url: "/api/auth", payload: { code: CODE } })
+      expect((res.cookies[0] as Record<string, unknown>).secure).toBe(true)
+    } finally {
+      if (before === undefined) delete process.env.NODE_ENV
+      else process.env.NODE_ENV = before
+    }
+  })
+
   it("sets an httpOnly cookie for the right code, which then opens /api", async () => {
     const app = await newApp()
     const res = await app.inject({ method: "POST", url: "/api/auth", payload: { code: CODE } })
@@ -228,6 +256,8 @@ describe("api auth", () => {
     expect(cookie.httpOnly).toBe(true)
     expect(cookie.path).toBe("/")
     expect(String(cookie.sameSite).toLowerCase()).toBe("lax")
+    // Off on a plain-http laptop, or the browser would drop the cookie and lock the operator out.
+    expect(cookie.secure).toBeFalsy()
 
     const listed = await app.inject({
       method: "GET",
@@ -301,6 +331,69 @@ describe("api run creation", () => {
     const res = await createRun(app, { goal: GOAL, preset: null })
     expect(res.statusCode).toBe(429)
   })
+
+  it("survives a run that dies before the loop can handle its own failure", async () => {
+    const app = await newApp(() => new FakeLLM(FINISH_SCRIPT))
+    // The loop writes its first status *before* its try block, so an unwritable log rejects the
+    // promise nobody is awaiting — which takes the whole process down if it is not caught here.
+    const append = RunEventLog.prototype.append
+    RunEventLog.prototype.append = () => {
+      throw new Error("no space left on device")
+    }
+    let id: string
+    try {
+      const res = await createRun(app, { goal: GOAL, preset: null })
+      expect(res.statusCode).toBe(201)
+      id = res.json().id as string
+      await sleep(20)
+    } finally {
+      RunEventLog.prototype.append = append
+    }
+
+    // Still serving, and the dead run is not holding a concurrency slot for ever.
+    const listed = await authed(app, { method: "GET", url: "/api/runs" })
+    expect(listed.statusCode).toBe(200)
+    expect((listed.json() as RunSummary[]).find((r) => r.id === id)!.status).toBe("failed")
+  })
+})
+
+describe("api live stream", () => {
+  let app: FastifyInstance
+  let base: string
+  const gate = new GateLLM()
+
+  beforeAll(async () => {
+    app = await newApp(() => gate)
+    await app.listen({ port: 0, host: "127.0.0.1" })
+    base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`
+  })
+
+  afterAll(async () => {
+    gate.finish()
+    await app.close()
+  })
+
+  it("delivers events appended after the client connected", async () => {
+    const created = await createRun(app, { goal: GOAL, preset: null })
+    const id = created.json().id as string
+    // The loop is parked inside the model turn, two events in: the status and the first shot.
+    await gate.started
+
+    const client = await openSse(base, `/api/runs/${id}/events?from=1`)
+    await client.readUntil((f) => f.length >= 2)
+    expect(client.frames.map((f) => f.data!.event.type)).toEqual(["run_status", "screenshot"])
+    // Replay is exhausted, so everything from here can only have come through the fan-out.
+    expect(await client.idleFor(200)).toBe(true)
+
+    gate.finish()
+    await client.readUntil((f) => f.some((x) => x.data!.event.type === "done"))
+    const live = client.frames.slice(2)
+    expect(live.map((f) => f.data!.event.type)).toContain("action_result")
+    expect(live[0]!.data!.seq).toBe(3)
+
+    client.close()
+    await waitForTerminal(app, id)
+  }, 40_000)
 })
 
 describe("api with a finished run", () => {
@@ -323,13 +416,7 @@ describe("api with a finished run", () => {
     await app.close()
   })
 
-  function sse(path: string, headers: Record<string, string> = {}): Promise<SseClient> {
-    const ac = new AbortController()
-    return fetch(`${base}${path}`, {
-      headers: { cookie: `${COOKIE}=${CODE}`, ...headers },
-      signal: ac.signal,
-    }).then((res) => new SseClient(res, ac))
-  }
+  const sse = (path: string, headers: Record<string, string> = {}) => openSse(base, path, headers)
 
   it("lists the run with its goal, preset and cost", async () => {
     const res = await authed(app, { method: "GET", url: "/api/runs" })
@@ -358,6 +445,13 @@ describe("api with a finished run", () => {
       const res = await authed(app, { method: "GET", url: `/api/runs/${id}/shots/${attempt}` })
       expect(res.statusCode, attempt).toBe(404)
     }
+  })
+
+  it("tells browsers not to sniff a content type", async () => {
+    const json = await authed(app, { method: "GET", url: "/api/runs" })
+    expect(json.headers["x-content-type-options"]).toBe("nosniff")
+    const shot = await authed(app, { method: "GET", url: `/api/runs/${id}/shots/1.jpg` })
+    expect(shot.headers["x-content-type-options"]).toBe("nosniff")
   })
 
   it("needs the cookie for shots too", async () => {
@@ -399,6 +493,7 @@ describe("api with a finished run", () => {
     expect(client.res.headers.get("content-type")).toContain("text/event-stream")
     expect(client.res.headers.get("cache-control")).toContain("no-cache")
     expect(client.res.headers.get("x-accel-buffering")).toBe("no")
+    expect(client.res.headers.get("x-content-type-options")).toBe("nosniff")
 
     await client.readUntil((f) => f.some((x) => x.data?.event.type === "done"))
     // The terminal status is appended *after* done; a stream closed on done would lose it.

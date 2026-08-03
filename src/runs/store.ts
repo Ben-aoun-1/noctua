@@ -5,10 +5,19 @@ import { RunEventLog } from "../events/log.js"
 import type { RunStatus } from "../events/types.js"
 import { RunControl } from "./control.js"
 
+/**
+ * The named task presets. The HTTP layer validates against this same list, so a preset added here
+ * is accepted at the door rather than rejected by a copy of the list that nobody remembered.
+ */
+export const RUN_PRESETS = ["vendor", "compliance"] as const
+
+/** A run's preset, or `null` for a free-form goal. */
+export type RunPreset = (typeof RUN_PRESETS)[number] | null
+
 export interface Run {
   id: string
   goal: string
-  preset: "vendor" | "compliance" | null
+  preset: RunPreset
   createdAt: number
   log: RunEventLog
   control: RunControl
@@ -45,7 +54,8 @@ const TERMINAL_STATUSES: readonly RunStatus[] = ["finished", "failed", "stopped"
 /** Every member of `RunStatus` — a meta.json carrying anything else is not ours. */
 const ALL_STATUSES: readonly RunStatus[] = [...ACTIVE_STATUSES, ...TERMINAL_STATUSES]
 
-const PRESETS: readonly Run["preset"][] = ["vendor", "compliance", null]
+/** Everything `Run["preset"]` may be on disk — the named presets plus free-form. */
+const PRESETS: readonly RunPreset[] = [...RUN_PRESETS, null]
 
 function summarize(run: Run): RunSummary {
   return {
