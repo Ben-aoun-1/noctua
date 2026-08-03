@@ -5,15 +5,23 @@ import type { FastifyInstance, FastifyRequest } from "fastify"
 import type { LLMFactory } from "../agent/llm.js"
 import { runAgent } from "../agent/loop.js"
 import { config } from "../config.js"
+import { RunEventLog } from "../events/log.js"
 import type { PersistedEvent } from "../events/types.js"
+import { buildReport, toCsv, toMarkdown, type Report } from "../exports/report.js"
 import type { RunControl } from "../runs/control.js"
-import { RunStore, RUN_PRESETS, type RunPreset } from "../runs/store.js"
+import {
+  persistRun,
+  RunStore,
+  RUN_PRESETS,
+  type RunPreset,
+  type RunSummary,
+} from "../runs/store.js"
 
 /**
  * Everything the browser talks to: one access code, one way to start a run, one stream to watch it
  * on, and one way to intervene.
  *
- * Two shapes here are load-bearing rather than stylistic:
+ * Three shapes here are load-bearing rather than stylistic:
  *
  * - **The stream is never closed by the server.** A run's `done` event is followed by its terminal
  *   `run_status`, so a stream that ended on `done` would drop the very event the cockpit uses to
@@ -22,6 +30,10 @@ import { RunStore, RUN_PRESETS, type RunPreset } from "../runs/store.js"
  *   (`RunEventLog` fans out from inside `append`, so writing back from a subscriber would recurse
  *   into it and interleave sequence numbers). A control call moves `RunControl`; the *loop* is what
  *   turns that into an event, if and when it acts on it.
+ * - **A run this process never drove can still be read back.** Replay and export open the run's
+ *   own files directly, so yesterday's work survives a restart. That second `RunEventLog` is only
+ *   ever built for a run that is *not* in memory — a live run has exactly one log, and a second
+ *   one over the same directory would fork its `seq` counter.
  */
 
 const COOKIE = "noctua_code"
@@ -45,6 +57,42 @@ const MAX_ANSWER_CHARS = 2000
  */
 const SHOT_NAME = /^[\w.-]+\.jpg$/
 
+/**
+ * What a run id may look like before it is joined into a filesystem path. `randomUUID` is the only
+ * thing that ever names a run directory, so anything carrying a separator, a dot or a `%` is not
+ * one of ours and is answered without going near the disk. It also makes the id safe to quote in a
+ * `content-disposition` filename.
+ */
+const RUN_ID = /^[0-9a-f-]{36}$/i
+
+/**
+ * Excel reads a UTF-8 CSV as the local codepage unless the file opens with a byte order mark —
+ * which turns every accented vendor name in a European ledger into mojibake. The bytes are
+ * otherwise plain RFC 4180.
+ */
+const UTF8_BOM = "\uFEFF"
+
+/** The three shapes a report is served in: how it is rendered, typed, and named on disk. */
+const FORMATS = {
+  md: {
+    ext: "md",
+    type: "text/markdown; charset=utf-8",
+    render: (report: Report): string => toMarkdown(report),
+  },
+  json: {
+    ext: "json",
+    type: "application/json; charset=utf-8",
+    render: (report: Report): string => JSON.stringify(report),
+  },
+  csv: {
+    ext: "csv",
+    type: "text/csv; charset=utf-8",
+    render: (report: Report): string => UTF8_BOM + toCsv(report.findings),
+  },
+} as const
+
+type ExportFormat = keyof typeof FORMATS
+
 export interface ApiOpts {
   llmFactory: LLMFactory
 }
@@ -53,8 +101,17 @@ interface RunParams {
   id: string
 }
 
+/** A run's goal and its whole log, wherever they were found. */
+interface ExportSource {
+  goal: string
+  events: PersistedEvent[]
+}
+
 export async function apiRoutes(app: FastifyInstance, opts: ApiOpts): Promise<void> {
-  const store = new RunStore(config.dataDir)
+  // Read once and shared with everything below that opens a run's files, so the store and the logs
+  // it hands out can never end up pointed at two different directories.
+  const dataDir = config.dataDir
+  const store = new RunStore(dataDir)
 
   // Registered inside this plugin, so it guards these routes and nothing else: `/healthz` and the
   // static SPA live in the parent context and stay open.
@@ -112,9 +169,17 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiOpts): Promise<vo
     // happens before that. An unwritable data directory would therefore reject a promise nobody is
     // awaiting, which in Node means the whole server dies with it. This catch is that floor: the
     // run is already lost, and marking it terminal in memory at least stops it holding a
-    // concurrency slot for ever. Nothing is appended or persisted here — the log is what failed.
+    // concurrency slot for ever. Nothing is appended here — the log is what failed.
     void runAgent(run, llm).catch((err: unknown) => {
       run.status = "failed"
+      // meta.json is a different file from the log that just died, and may well still be
+      // writable — worth the attempt, so a restart lists this run as failed rather than as
+      // pending for ever. Guarded, because it is just as likely to be the thing that broke.
+      try {
+        persistRun(run)
+      } catch {
+        // ignored on purpose
+      }
       console.error(`run ${run.id} died before the loop could report it:`, err)
     })
     return reply.code(201).send({ id: run.id })
@@ -123,10 +188,15 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiOpts): Promise<vo
   /**
    * The live feed. Replay and live delivery are one subscription, so an event appended between the
    * file read and the handoff cannot fall down the gap between them.
+   *
+   * A run this process is not driving is served from its file alone: the log is complete, nothing
+   * will ever append to it again, and replaying it is exactly what the cockpit does with a run it
+   * has just opened. That is the whole of "watch yesterday's flight back".
    */
   app.get<{ Params: RunParams }>("/api/runs/:id/events", async (req, reply) => {
     const run = store.get(req.params.id)
-    if (!run) return reply.code(404).send({ error: "unknown run" })
+    const log = run ? run.log : diskLog(store, dataDir, req.params.id)
+    if (!log) return reply.code(404).send({ error: "unknown run" })
 
     // From here the socket is ours; Fastify must not try to send a body of its own.
     reply.hijack()
@@ -146,7 +216,7 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiOpts): Promise<vo
     // The listening socket already keeps the process alive; this only means a heartbeat can never
     // be the last thing holding it open.
     heartbeat.unref()
-    const unsubscribe = run.log.subscribe(startSeq(req), (pe) => {
+    const unsubscribe = log.subscribe(startSeq(req), (pe) => {
       reply.raw.write(frame(pe))
     })
     const stop = (): void => {
@@ -170,6 +240,34 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiOpts): Promise<vo
     return { ok: true }
   })
 
+  /**
+   * The run, as something to keep: a Markdown report to read, JSON to feed a script, or the CSV
+   * that goes into a ledger. Served for finished runs found on disk as well as live ones — the
+   * export is the point of the whole exercise, and it must outlive the process that earned it.
+   */
+  app.get<{ Params: RunParams; Querystring: { format?: string } }>(
+    "/api/runs/:id/export",
+    async (req, reply) => {
+      const format = readFormat(req.query.format)
+      // Checked before the run is looked for, so a typo in the query string never sends us to the
+      // filesystem for an answer it cannot use.
+      if (!format) {
+        return reply.code(400).send({ error: `format must be ${Object.keys(FORMATS).join(", ")}` })
+      }
+      const source = loadForExport(store, dataDir, req.params.id)
+      if (!source) return reply.code(404).send({ error: "unknown run" })
+
+      const report = buildReport(source.goal, source.events)
+      // Enough of the id to tell one download from another in a folder of them, and short enough
+      // to stay readable. The id is known to be a run id by now, so nothing can escape the quotes.
+      const filename = `noctua-${req.params.id.slice(0, 8)}.${format.ext}`
+      return reply
+        .type(format.type)
+        .header("content-disposition", `attachment; filename="${filename}"`)
+        .send(format.render(report))
+    },
+  )
+
   app.get<{ Params: RunParams & { file: string } }>(
     "/api/runs/:id/shots/:file",
     async (req, reply) => {
@@ -182,6 +280,42 @@ export async function apiRoutes(app: FastifyInstance, opts: ApiOpts): Promise<vo
       return reply.type("image/jpeg").send(createReadStream(path))
     },
   )
+}
+
+/** The named export format, defaulting to Markdown; null for one we do not write. */
+function readFormat(value: unknown): (typeof FORMATS)[ExportFormat] | null {
+  const name = typeof value === "string" && value !== "" ? value : "md"
+  // `hasOwn` rather than a bare lookup: `?format=constructor` would otherwise find something.
+  return Object.hasOwn(FORMATS, name) ? FORMATS[name as ExportFormat] : null
+}
+
+/**
+ * A run's goal and its whole event log, whether or not this process is the one that drove it.
+ *
+ * A live run is read from the log it is already writing. Anything else comes off disk — the goal
+ * from `meta.json` (the events never carry it) and the events from the file, through a log opened
+ * for this read alone. Nothing here appends, and a live run never reaches that second `RunEventLog`.
+ */
+function loadForExport(store: RunStore, dataDir: string, id: string): ExportSource | null {
+  const live = store.get(id)
+  if (live) return { goal: live.goal, events: live.log.readAll() }
+  const meta = diskMeta(store, id)
+  if (!meta) return null
+  return { goal: meta.goal, events: new RunEventLog(id, dataDir).readAll() }
+}
+
+/** The log file of a finished run this process never drove, reopened to be replayed and no more. */
+function diskLog(store: RunStore, dataDir: string, id: string): RunEventLog | null {
+  return diskMeta(store, id) ? new RunEventLog(id, dataDir) : null
+}
+
+/**
+ * What disk remembers of a run, or null — including for an id that is not a run id at all, which
+ * is checked *before* anything joins it into a path.
+ */
+function diskMeta(store: RunStore, id: string): RunSummary | null {
+  if (!RUN_ID.test(id)) return null
+  return store.readMeta(id)
 }
 
 /**

@@ -15,7 +15,9 @@ const MIN_ACCESS_CODE_CHARS = 12
  * rather than coming up unlocked.
  */
 if (process.env.NODE_ENV === "production") {
-  const code = process.env.ACCESS_CODE ?? ""
+  // Trimmed first: a code that is all spaces is not a code, and one pasted with a trailing
+  // newline must not be counted as a character longer than it is.
+  const code = (process.env.ACCESS_CODE ?? "").trim()
   if (code === "") {
     throw new Error("ACCESS_CODE must be set in production — the built-in default code is public")
   }

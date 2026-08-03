@@ -146,20 +146,32 @@ export class RunStore {
     return total
   }
 
+  /**
+   * One run's `meta.json`, or null when there is none to read — which is how a caller asks "did
+   * this process's predecessor know about this run?" without holding it in memory.
+   *
+   * `id` is joined into a path, so it must already have been checked to be a run id: the HTTP
+   * layer does that at the door, and the only other caller is the directory walk below.
+   */
+  readMeta(id: string): RunSummary | null {
+    const file = join(this.dataDir, "runs", id, "meta.json")
+    if (!existsSync(file)) return null // a run dir whose create never finished; not listable
+    try {
+      return this.parseMeta(readFileSync(file, "utf8"))
+    } catch {
+      // Unreadable meta must not take down the whole history listing.
+      return null
+    }
+  }
+
   private readDiskMeta(): RunSummary[] {
     const runsDir = join(this.dataDir, "runs")
     if (!existsSync(runsDir)) return []
     const out: RunSummary[] = []
     for (const entry of readdirSync(runsDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue
-      const file = join(runsDir, entry.name, "meta.json")
-      if (!existsSync(file)) continue // a run dir whose create never finished; not listable
-      try {
-        const summary = this.parseMeta(readFileSync(file, "utf8"))
-        if (summary) out.push(summary)
-      } catch {
-        // Unreadable meta must not take down the whole history listing.
-      }
+      const summary = this.readMeta(entry.name)
+      if (summary) out.push(summary)
     }
     return out
   }

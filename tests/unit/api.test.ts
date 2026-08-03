@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -354,6 +354,11 @@ describe("api run creation", () => {
     const listed = await authed(app, { method: "GET", url: "/api/runs" })
     expect(listed.statusCode).toBe(200)
     expect((listed.json() as RunSummary[]).find((r) => r.id === id)!.status).toBe("failed")
+
+    // The log is what broke; meta.json is a different file and was still writable. Without that
+    // second write the run outlives this process as `running`, for ever.
+    const meta = readFileSync(join(config.dataDir, "runs", id, "meta.json"), "utf8")
+    expect((JSON.parse(meta) as RunSummary).status).toBe("failed")
   })
 })
 
