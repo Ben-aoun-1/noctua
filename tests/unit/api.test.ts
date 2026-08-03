@@ -595,7 +595,12 @@ describe("static single page app", () => {
   })
 
   it("serves the API alone when the app has not been built", async () => {
-    const app = await newApp(() => new FakeLLM([]))
+    // Pointed at a directory that provably does not exist, rather than left on the default: the
+    // default is the real `web/dist`, which *is* there on any machine where the SPA has been
+    // built — and this test is about the machine where it has not.
+    config.dataDir = mkdtempSync(join(tmpdir(), "noctua-api-"))
+    const unbuilt = join(mkdtempSync(join(tmpdir(), "noctua-web-")), "dist")
+    const app = await buildServer({ webDist: unbuilt, llmFactory: () => new FakeLLM([]) })
     expect((await app.inject({ method: "GET", url: "/" })).statusCode).toBe(404)
     expect((await authed(app, { method: "GET", url: "/api/runs" })).statusCode).toBe(200)
   })

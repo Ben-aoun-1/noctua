@@ -1,0 +1,151 @@
+/**
+ * Noctua's design system — Minerva's own palette and type, self-hosted.
+ *
+ * Three things are deliberate here:
+ *
+ * - **Nothing is fetched from a third party.** The three families come in through npm
+ *   (`@fontsource*`) and are bundled as woff2 next to the app, so the page renders identically on a
+ *   laptop with no network route to Google and leaks nothing about who is reading it.
+ * - **The tokens are plain custom properties, and Tailwind is layered on top of them** via
+ *   `@theme inline`: `bg-sand` compiles to `var(--sand)` rather than to a copy of the hex, so the
+ *   palette has exactly one definition and anything can read it — a utility class, a hand-written
+ *   rule, or a component doing arithmetic in `color-mix`.
+ * - **Instrument Serif has one weight.** Emphasis in the display face is made with size, never with
+ *   `font-weight`, and `font-synthesis-weight` is off so a browser cannot smear a fake bold over it.
+ */
+
+@import "@fontsource/instrument-serif/400.css";
+@import "@fontsource-variable/geist/wght.css";
+@import "@fontsource-variable/geist-mono/wght.css";
+@import "tailwindcss";
+
+:root {
+  /* Their exact body background and ink; the rest of the palette harmonizes with them. */
+  --ivory: #f1ece6;
+  --ink: #171717;
+  --sand: #e3dccb;
+  --cream: #faf7f0;
+  --sage: #4a6b4f;
+  --bronze: #b08d3e;
+  --oxide: #9c3d2e;
+}
+
+@theme inline {
+  --color-ivory: var(--ivory);
+  --color-ink: var(--ink);
+  --color-sand: var(--sand);
+  --color-cream: var(--cream);
+  --color-sage: var(--sage);
+  --color-bronze: var(--bronze);
+  --color-oxide: var(--oxide);
+
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--ivory);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Keyboard users get a visible ring; mouse users are never shown one. */
+  :focus-visible {
+    outline: 1px solid color-mix(in oklab, var(--ink) 45%, transparent);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background-color: color-mix(in oklab, var(--bronze) 28%, transparent);
+  }
+}
+
+@layer components {
+  /* Display face. Size carries the emphasis — there is no bold cut, and none is to be synthesized. */
+  .serif {
+    font-family: var(--font-serif);
+    font-weight: 400;
+    font-synthesis-weight: none;
+    letter-spacing: -0.01em;
+  }
+
+  /* Anything an accountant would want to compare down a column: figures, ids, URLs, logs. */
+  .mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Their section headers: small, uppercase, widely tracked, and deliberately quiet. */
+  .microlabel {
+    font-size: 11px;
+    line-height: 1.45;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: color-mix(in oklab, var(--ink) 50%, transparent);
+  }
+
+  /* The one divider in the system: 1px of ink at 10%. Pair with a border-width utility. */
+  .hairline {
+    border-color: color-mix(in oklab, var(--ink) 10%, transparent);
+  }
+
+  .btn-ink,
+  .btn-outline {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: 4px;
+    border: 1px solid var(--ink);
+    padding: 0.7rem 1.1rem;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1.15;
+    cursor: pointer;
+    transition:
+      background-color 120ms ease,
+      color 120ms ease,
+      opacity 120ms ease;
+  }
+
+  .btn-ink {
+    background-color: var(--ink);
+    color: var(--cream);
+  }
+
+  .btn-outline {
+    background-color: transparent;
+    color: var(--ink);
+  }
+
+  .btn-ink:hover:not(:disabled) {
+    opacity: 0.85;
+  }
+
+  .btn-outline:hover:not(:disabled) {
+    background-color: var(--ink);
+    color: var(--cream);
+  }
+
+  /*
+   * A disabled action steps back rather than fading out: every preset card opens with its button
+   * disabled (the template still has brackets in it), and three washed-out black bars would be the
+   * first thing anyone sees. An outline reads as "not yet", which is what it means.
+   */
+  .btn-ink:disabled,
+  .btn-outline:disabled {
+    background-color: transparent;
+    color: color-mix(in oklab, var(--ink) 40%, transparent);
+    border-color: color-mix(in oklab, var(--ink) 15%, transparent);
+    cursor: not-allowed;
+  }
+}
