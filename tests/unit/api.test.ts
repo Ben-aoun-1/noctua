@@ -272,9 +272,12 @@ describe("api run creation", () => {
 
     gate.finish()
     await waitForTerminal(app, first.json().id as string)
+
     // With the run over, the cap frees up again.
-    expect((await createRun(app, { goal: GOAL, preset: null })).statusCode).toBe(201)
-    await waitForTerminal(app, (await authed(app, { method: "GET", url: "/api/runs" })).json()[0].id)
+    const third = await createRun(app, { goal: GOAL, preset: null })
+    expect(third.statusCode).toBe(201)
+    // Left running, its browser would outlive the test: see it to its end before moving on.
+    await waitForTerminal(app, third.json().id as string)
   })
 
   it("refuses a run when the day's budget is spent", async () => {
