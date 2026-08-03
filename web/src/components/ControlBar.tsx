@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react"
 import { controlRun, type ControlBody, type RunMode, type RunStatus } from "../api.ts"
-import { compactArgs, messageOf } from "../format.ts"
+import { actionLine, messageOf } from "../format.ts"
 import { isTerminal } from "../useRunStream.ts"
 import StatusDot from "./StatusDot.tsx"
 
@@ -14,11 +14,16 @@ import StatusDot from "./StatusDot.tsx"
  *
  * Every call disables its own control while it is in flight and re-enables it whatever happens, so
  * a slow network can never leave a dead button behind; a refusal is printed in the server's own
- * sentence, in oxide, under the bar. The steering box keeps its own flag rather than sharing the
- * transport's: a note being posted must never be able to hold the STOP button shut.
+ * sentence, in oxide, under the bar. Three separate in-flight flags rather than one, because STOP
+ * is the control you reach for when something is going wrong: neither a mode switch, a pause, nor
+ * a steering note posted a moment earlier may hold it shut.
  *
  * Once a run is terminal every control is disabled rather than hidden. A dead run's cockpit should
  * still look like a cockpit — that is the difference between "this is over" and "this is broken".
+ * A disabled control must also *look* disabled, which is why the two buttons that carry a colour of
+ * their own drop it while they are held: a utility class sits in a later cascade layer than
+ * `.btn-outline:disabled`, so an oxide STOP left painted oxide would out-shout the disabled rule
+ * and read as live.
  */
 
 /** Mode is not readable back from the server, so the toggle is this client's own belief. */
@@ -29,6 +34,18 @@ const MODES: { mode: RunMode; label: string }[] = [
 
 /** Shared by every button in the footer: mono, small, widely tracked. */
 const BUTTON = "mono px-3 py-2 text-[11px] tracking-[0.1em]"
+
+/** STOP's colour, worn only while it can actually stop something. */
+const DANGER = "border-oxide text-oxide hover:bg-oxide hover:text-cream"
+
+/**
+ * The chosen mode segment, live and held.
+ *
+ * Held it keeps a fill — which mode a finished run flew in is worth reading back — but a tenth of
+ * ink rather than the full slab, so the segment sits inside the muted border and ink/40 text that
+ * `.btn-outline:disabled` gives it instead of shouting over them in cream on black.
+ */
+const SELECTED = { live: "bg-ink text-cream", held: "bg-ink/10" } as const
 
 /** The server's own caps. Better to stop the keystroke than to explain a 400 after the fact. */
 const MAX_STEER_CHARS = 500
@@ -49,20 +66,23 @@ export default function ControlBar({ runId, status, budget }: ControlBarProps) {
   const [mode, setMode] = useState<RunMode>("auto")
   const [note, setNote] = useState("")
   const [busy, setBusy] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const [steering, setSteering] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const over = isTerminal(status)
   const held = over || busy
+  const stopHeld = over || stopping
 
-  async function send(body: ControlBody): Promise<void> {
-    setBusy(true)
+  /** One control call, holding only its own flag down, and releasing it whatever happened. */
+  async function send(body: ControlBody, hold: (on: boolean) => void): Promise<void> {
+    hold(true)
     try {
       await controlRun(runId, body)
       setError(null)
     } catch (err) {
       setError(messageOf(err))
     } finally {
-      setBusy(false)
+      hold(false)
     }
   }
 
@@ -122,11 +142,12 @@ export default function ControlBar({ runId, status, budget }: ControlBarProps) {
               <button
                 key={segment.mode}
                 className={`btn-outline ${BUTTON} ${i === 0 ? "rounded-r-none" : "-ml-px rounded-l-none"} ${
-                  mode === segment.mode ? "bg-ink text-cream" : ""
+                  mode === segment.mode ? SELECTED[held ? "held" : "live"] : ""
                 }`}
                 aria-pressed={mode === segment.mode}
                 disabled={held}
                 onClick={() => void pickMode(segment.mode)}
+                data-testid={`mode-${segment.mode}`}
               >
                 {segment.label}
               </button>
@@ -136,15 +157,15 @@ export default function ControlBar({ runId, status, budget }: ControlBarProps) {
           <button
             className={`btn-outline ${BUTTON}`}
             disabled={held}
-            onClick={() => void send({ action: status === "paused" ? "resume" : "pause" })}
+            onClick={() => void send({ action: status === "paused" ? "resume" : "pause" }, setBusy)}
           >
             {status === "paused" ? "RESUME" : "PAUSE"}
           </button>
 
           <button
-            className={`btn-outline ${BUTTON} border-oxide text-oxide hover:bg-oxide hover:text-cream`}
-            disabled={held}
-            onClick={() => void send({ action: "stop" })}
+            className={`btn-outline ${BUTTON} ${stopHeld ? "" : DANGER}`}
+            disabled={stopHeld}
+            onClick={() => void send({ action: "stop" }, setStopping)}
             data-testid="stop"
           >
             STOP
@@ -190,6 +211,12 @@ export default function ControlBar({ runId, status, budget }: ControlBarProps) {
  *
  * Shown for a guarded action in autopilot as well as for every action in approve mode — the loop
  * decides which, and both arrive here as the same `action_proposed` event.
+ *
+ * The proposal is written the way the reasoning feed writes an action rather than as the raw
+ * arguments: this is the one moment a human is asked to take responsibility for a step, and
+ * `finish {"outcome":"success","summary":"Glowbar Ltd (0987…` is not a sentence anyone can consent
+ * to. A denial says so and waits, because a denied action produces no event of its own — the loop
+ * simply takes another turn, and until it does, two dead buttons look like a hung page.
  */
 export function ApprovalStrip({
   runId,
@@ -200,19 +227,20 @@ export function ApprovalStrip({
   tool: string
   args: Record<string, unknown>
 }) {
-  const [busy, setBusy] = useState(false)
+  const [settled, setSettled] = useState<"open" | "sending" | "approved" | "denied">("open")
   const [error, setError] = useState<string | null>(null)
 
   async function decide(action: "approve" | "deny"): Promise<void> {
-    setBusy(true)
+    setSettled("sending")
     try {
       await controlRun(runId, { action })
       setError(null)
+      // Left settled: this strip is about to be unmounted by the run moving on, and re-opening it
+      // first would offer a second decision on a question that is already answered.
+      setSettled(action === "deny" ? "denied" : "approved")
     } catch (err) {
       setError(messageOf(err))
-      // Only on failure: on success this strip is about to be unmounted by the run moving on, and
-      // re-enabling its buttons first would offer a second decision on a settled question.
-      setBusy(false)
+      setSettled("open")
     }
   }
 
@@ -222,24 +250,30 @@ export function ApprovalStrip({
       data-testid="approval-strip"
     >
       <p className="mono min-w-[240px] grow text-[12px] leading-[1.5] break-words text-bronze">
-        NOCTUA WANTS TO: {tool} {compactArgs(args)}
+        NOCTUA WANTS TO: {actionLine(tool, args)}
       </p>
-      <div className="flex items-center gap-2">
-        <button
-          className={`btn-ink ${BUTTON}`}
-          disabled={busy}
-          onClick={() => void decide("approve")}
-        >
-          APPROVE
-        </button>
-        <button
-          className={`btn-outline ${BUTTON}`}
-          disabled={busy}
-          onClick={() => void decide("deny")}
-        >
-          DENY
-        </button>
-      </div>
+      {settled === "denied" ? (
+        <p className="mono text-[11px] text-ink/50" data-testid="denied-note">
+          DENIED — WAITING FOR NOCTUA TO CHOOSE ANOTHER WAY
+        </p>
+      ) : (
+        <div className="flex items-center gap-2">
+          <button
+            className={`btn-ink ${BUTTON}`}
+            disabled={settled !== "open"}
+            onClick={() => void decide("approve")}
+          >
+            APPROVE
+          </button>
+          <button
+            className={`btn-outline ${BUTTON}`}
+            disabled={settled !== "open"}
+            onClick={() => void decide("deny")}
+          >
+            DENY
+          </button>
+        </div>
+      )}
       {error !== null && (
         <p className="mono w-full text-[11px] text-oxide" role="alert">
           {error}
@@ -249,7 +283,13 @@ export function ApprovalStrip({
   )
 }
 
-/** The band that stops the run until a human answers a question only they can answer. */
+/**
+ * The band that stops the run until a human answers a question only they can answer.
+ *
+ * It does not take focus when it appears. A question can arrive at any moment, including the
+ * moment someone is halfway through a steering note, and a field that grabs the caret mid-sentence
+ * loses the rest of it.
+ */
 export function AskStrip({ runId, question }: { runId: string; question: string }) {
   const [text, setText] = useState("")
   const [busy, setBusy] = useState(false)
@@ -288,7 +328,6 @@ export function AskStrip({ runId, question }: { runId: string; question: string 
           spellCheck={false}
           maxLength={MAX_ANSWER_CHARS}
           disabled={busy}
-          autoFocus
           data-testid="answer-input"
         />
         <button className={`btn-ink ${BUTTON}`} type="submit" disabled={busy || text.trim() === ""}>

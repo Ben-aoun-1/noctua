@@ -49,7 +49,7 @@ interface Digest {
 const ADDRESS_SAID = /(?:navigated to|went back to|still at) (\S+)/
 
 export default function Cockpit({ id }: { id: string }) {
-  const { events, status, live, error } = useRunStream(id)
+  const { events, status, live, opened, error } = useRunStream(id)
   const [goal, setGoal] = useState<string | null>(null)
   const [goalMissing, setGoalMissing] = useState(false)
   /** The receipt currently open, shared by the findings table and the live view. */
@@ -105,7 +105,10 @@ export default function Cockpit({ id }: { id: string }) {
             ← ALL FLIGHTS
           </a>
         </div>
-        {(error !== null || (!live && !over)) && (
+        {/* "Reconnecting" is only true of a feed that was connected: before the first `onopen`
+            this would fire on every run's first paint, announcing a fault that is just a socket
+            being opened. */}
+        {(error !== null || (opened && !live && !over)) && (
           <p className={`microlabel mx-auto mt-1 w-full max-w-[1600px] ${error ? "text-oxide" : ""}`}>
             {error ?? "RECONNECTING…"}
           </p>

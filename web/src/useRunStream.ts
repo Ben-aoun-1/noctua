@@ -40,12 +40,20 @@ export interface RunStream {
   status: RunStatus
   /** Whether the feed is open right now — false while `EventSource` is between attempts. */
   live: boolean
+  /**
+   * Whether the feed has ever been open.
+   *
+   * The difference between "opening" and "dropped out": both are `live: false`, and only one of
+   * them is worth telling anyone about. Without this the first paint of every single run would
+   * flash "RECONNECTING…" in the half-second before the socket answers.
+   */
+  opened: boolean
   /** Set only when the feed is not coming back: a run that cannot be opened at all. */
   error: string | null
 }
 
 function empty(): RunStream {
-  return { events: [], status: "pending", live: false, error: null }
+  return { events: [], status: "pending", live: false, opened: false, error: null }
 }
 
 export function useRunStream(id: string): RunStream {
@@ -62,7 +70,11 @@ export function useRunStream(id: string): RunStream {
     const source = new EventSource(eventsUrl(id, 1))
 
     source.onopen = () => {
-      setState((prev) => (prev.live && prev.error === null ? prev : { ...prev, live: true, error: null }))
+      setState((prev) =>
+        prev.live && prev.opened && prev.error === null
+          ? prev
+          : { ...prev, live: true, opened: true, error: null },
+      )
     }
 
     source.onerror = () => {
@@ -87,6 +99,8 @@ export function useRunStream(id: string): RunStream {
         events: [...prev.events, pe],
         status: pe.event.type === "run_status" ? pe.event.status : prev.status,
         live: closing ? false : prev.live,
+        // An event arrived, so the socket is open whatever order `onopen` happened to fire in.
+        opened: true,
         // A run that reached us at all did not fail to open, whatever an earlier attempt said.
         error: null,
       }))

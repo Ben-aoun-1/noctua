@@ -19,9 +19,16 @@ import { exportUrl, type DoneOutcome, type ExportFormat } from "../api.ts"
 /** Past this the table stops being scannable inside a third of the screen. */
 const MAX_COLUMNS = 5
 
-/** The fields worth a column when there are more fields than columns. */
+/**
+ * The fields worth a column when there are more fields than columns, best first.
+ *
+ * These are also the fields exempt from the repeated-value rule below: one vendor's dossier has the
+ * same `legal_name` on every row, and that is the first thing anyone reads, not noise.
+ */
 const PREFERRED_COLUMNS = [
   "legal_name",
+  "company_number",
+  "vat_number",
   "vat_valid",
   "registry_status",
   "title",
@@ -235,8 +242,13 @@ function Row({
 /**
  * The columns to show: every key the findings carry, first-seen order, capped.
  *
- * When the cap bites, the preferred fields are the ones kept and `source` is the one dropped first —
- * but the row is still *drawn* in first-seen order, so the table reads the way the model wrote it
+ * Two things are dropped before the cap is even reached. A field that reads the same on every row
+ * (`kind: vendor`, over and over) describes the *run*, not the row — it is a column of one repeated
+ * answer, and the pane has five columns to spend. And `source` is the widest thing a finding
+ * carries and is never lost by being dropped, because the receipt under the row is exactly where it
+ * is shown; so it is the last non-preferred field to get a column.
+ *
+ * The row is still *drawn* in first-seen order, so the table reads the way the model wrote it
  * rather than the way this list happens to be ordered.
  */
 function columnsOf(findings: Finding[]): string[] {
@@ -244,14 +256,33 @@ function columnsOf(findings: Finding[]): string[] {
   for (const finding of findings) {
     for (const key of Object.keys(finding.data)) if (!seen.includes(key)) seen.push(key)
   }
-  if (seen.length <= MAX_COLUMNS) return seen
 
-  const kept = new Set(PREFERRED_COLUMNS.filter((key) => seen.includes(key)).slice(0, MAX_COLUMNS))
-  for (const key of [...seen.filter((key) => key !== SOURCE), SOURCE]) {
+  const varied = seen.filter(
+    (key) => PREFERRED_COLUMNS.includes(key) || !repeats(findings, key),
+  )
+  // A run whose findings are genuinely all one value would otherwise table nothing at all.
+  const usable = varied.length > 0 ? varied : seen
+  if (usable.length <= MAX_COLUMNS) return usable
+
+  const kept = new Set(PREFERRED_COLUMNS.filter((key) => usable.includes(key)).slice(0, MAX_COLUMNS))
+  for (const key of [...usable.filter((key) => key !== SOURCE), SOURCE]) {
     if (kept.size >= MAX_COLUMNS) break
-    if (seen.includes(key)) kept.add(key)
+    if (usable.includes(key)) kept.add(key)
   }
-  return seen.filter((key) => kept.has(key))
+  return usable.filter((key) => kept.has(key))
+}
+
+/**
+ * Whether a field says the same thing on every row.
+ *
+ * Compared as the cell renders it, so a row that simply does not carry the field reads as blank and
+ * counts as different — "every row says Active" and "one row says Active and the rest say nothing"
+ * are not the same claim. A single finding is never repetition: there is nothing to repeat.
+ */
+function repeats(findings: Finding[], key: string): boolean {
+  if (findings.length < 2) return false
+  const first = cellText(findings[0].data[key])
+  return findings.every((finding) => cellText(finding.data[key]) === first)
 }
 
 /** One cell. A field a row does not carry is empty — never the word "undefined". */
