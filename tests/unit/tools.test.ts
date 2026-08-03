@@ -46,11 +46,12 @@ beforeEach(() => {
 })
 
 describe("tool definitions", () => {
-  it("offers exactly the nine tools the loop drives", () => {
+  it("offers exactly the ten tools the loop drives", () => {
     expect(toolDefs.map((t) => t.name)).toEqual([
       "navigate",
       "click",
       "type",
+      "select_option",
       "scroll",
       "go_back",
       "wait",
@@ -72,6 +73,14 @@ describe("tool definitions", () => {
     }
   })
 
+  // The tool description and the system prompt are read together; they must not disagree about
+  // where field names come from or about `source` being mandatory.
+  it("points record_finding at the task's schema and at source", () => {
+    const def = toolDefs.find((t) => t.name === "record_finding")!
+    expect(def.description).toMatch(/exactly those field names/)
+    expect(def.description).toMatch(/source/)
+  })
+
   it("bounds the wait so the model is told the ceiling, not just clamped at it", () => {
     const seconds = (toolDefs.find((t) => t.name === "wait")!.input_schema.properties ?? {}) as {
       seconds: { minimum?: number; maximum?: number }
@@ -86,6 +95,7 @@ describe("tool definitions", () => {
       navigate: ["url"],
       click: ["ref", "why"],
       type: ["ref", "text", "why"],
+      select_option: ["ref", "option", "why"],
       scroll: ["direction"],
       go_back: [],
       wait: ["seconds", "reason"],
@@ -215,9 +225,59 @@ describe("executeTool", () => {
 
   it("names a stale ref instead of timing out on a missing element", async () => {
     await executeTool("navigate", { url: fx.baseUrl + "/index.html" }, ctx)
+    // The recovery has to be spelled out: "look again" is not something the toolset can do,
+    // whereas the next listing arrives on its own with the right number in it.
     await expect(executeTool("click", { ref: 9999, why: "click nothing" }, ctx)).rejects.toThrow(
-      /stale ref \[9999\]/,
+      /stale ref \[9999\][^]*use the numbers from the LATEST element listing/,
     )
+    await expect(
+      executeTool("type", { ref: 9999, text: "x", why: "type nowhere" }, ctx),
+    ).rejects.toThrow(/use the numbers from the LATEST element listing/)
+    await expect(
+      executeTool("select_option", { ref: 9999, option: "x", why: "pick nothing" }, ctx),
+    ).rejects.toThrow(/use the numbers from the LATEST element listing/)
+  })
+
+  it("selects a dropdown option by its visible label", async () => {
+    await executeTool("navigate", { url: fx.baseUrl + "/registry.html" }, ctx)
+    const select = (await capture(ctx.page)).elements.find((e) => e.role === "combobox")!
+
+    const out = await executeTool(
+      "select_option",
+      { ref: select.ref, option: "Scotland", why: "the company is Scottish" },
+      ctx,
+    )
+    expect(out.summary).toBe(`selected "Scotland" in [${select.ref}]`)
+    expect(await ctx.page.inputValue("select[name=jurisdiction]")).toBe("sc")
+  })
+
+  it("falls back to the option's value when the label does not match", async () => {
+    await executeTool("navigate", { url: fx.baseUrl + "/registry.html" }, ctx)
+    const select = (await capture(ctx.page)).elements.find((e) => e.role === "combobox")!
+    await ctx.page.selectOption("select[name=jurisdiction]", "sc") // move off the default first
+
+    const out = await executeTool(
+      "select_option",
+      { ref: select.ref, option: "ew", why: "the registry expects the code" },
+      ctx,
+    )
+    expect(out.summary).toBe(`selected "ew" in [${select.ref}]`)
+    expect(await ctx.page.inputValue("select[name=jurisdiction]")).toBe("ew")
+  })
+
+  it("lists the real options when the model asks for one that does not exist", async () => {
+    await executeTool("navigate", { url: fx.baseUrl + "/registry.html" }, ctx)
+    const select = (await capture(ctx.page)).elements.find((e) => e.role === "combobox")!
+
+    await expect(
+      executeTool(
+        "select_option",
+        { ref: select.ref, option: "Wales only", why: "guessing at the jurisdiction" },
+        ctx,
+      ),
+    ).rejects.toThrow(/England and Wales[^]*Scotland/)
+    // The page is left as it was, so the next screenshot and the observation agree.
+    expect(await ctx.page.inputValue("select[name=jurisdiction]")).toBe("ew")
   })
 
   it("goes back to the previous page", async () => {
@@ -309,5 +369,9 @@ describe("isGuarded", () => {
     expect(isGuarded("type", { ref: 1, text: "x" })).toBe(false)
     expect(isGuarded("click", { ref: 1, why: "pay now" })).toBe(false)
     expect(isGuarded("navigate", { url: "https://example.com" })).toBe(false)
+    // Choosing a dropdown value posts nothing on its own — the submit that follows is the gate.
+    expect(isGuarded("select_option", { ref: 1, option: "Ireland", why: "member state" })).toBe(
+      false,
+    )
   })
 })

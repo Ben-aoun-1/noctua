@@ -63,6 +63,30 @@ describe("buildSystemPrompt — shared contract", () => {
     expect(p).toMatch(/second attempt[^.]*ask_human/i)
   })
 
+  // snapshotText numbers from 1; a worked example starting at [0] teaches an off-by-one.
+  it.each(PRESETS)("shows a worked observation with 1-based refs (%s)", (preset) => {
+    const p = buildSystemPrompt(preset)
+    expect(p).toContain('[1] link "Home"')
+    expect(p).not.toMatch(/^\[0\] /m)
+  })
+
+  // The listing is built from the whole DOM, not the viewport: scrolling reveals pixels and
+  // triggers lazy rendering, it does not reveal refs.
+  it.each(PRESETS)("describes scrolling as a screenshot concern (%s)", (preset) => {
+    const p = buildSystemPrompt(preset)
+    expect(p).toMatch(/listing covers the whole page/i)
+    expect(p).toMatch(/lazy/i)
+    expect(p).not.toMatch(/scroll or navigate to a page that has it/)
+  })
+
+  it.each(PRESETS)("reserves wait for a page that is still rendering (%s)", (preset) => {
+    const p = buildSystemPrompt(preset)
+    expect(p).toMatch(/still loading or rendering/i)
+    expect(p).toMatch(/1-3 seconds|1 to 3 seconds/)
+    expect(p).toMatch(/does not count as your one retry/i)
+    expect(p).toContain("go_back")
+  })
+
   it.each(PRESETS)("teaches record_finding discipline with a source url (%s)", (preset) => {
     const p = buildSystemPrompt(preset)
     expect(p).toContain("record_finding")
@@ -70,6 +94,8 @@ describe("buildSystemPrompt — shared contract", () => {
     expect(p).toMatch(/never (save|record) everything at the end/i)
     expect(p).toMatch(/`source`/)
     expect(p).toMatch(/step number is (attached|added) for you/i)
+    // "record the moment you confirm" must yield to a preset that defines one row per entity.
+    expect(p).toMatch(/row schema[^.]*wins/i)
   })
 
   it.each(PRESETS)("prefers official sources (%s)", (preset) => {
@@ -95,10 +121,17 @@ describe("buildSystemPrompt — shared contract", () => {
   })
 
   // The loop appends these alongside steering notes; unexplained, they read as page content.
+  // The budget note is quoted verbatim so the model recognizes the exact string it will get.
   it.each(PRESETS)("prepares the agent for stuck and budget notes (%s)", (preset) => {
     const p = buildSystemPrompt(preset)
     expect(p).toMatch(/stuck/i)
-    expect(p).toMatch(/budget/i)
+    expect(p).toContain("BUDGET EXHAUSTED")
+  })
+
+  it.each(PRESETS)("asks the agent to pace its step budget (%s)", (preset) => {
+    const p = buildSystemPrompt(preset)
+    expect(p).toMatch(/step budget/i)
+    expect(p).toMatch(/pace/i)
   })
 
   it.each(PRESETS)("makes USER STEERING binding (%s)", (preset) => {
@@ -150,6 +183,16 @@ describe("buildSystemPrompt — vendor preset", () => {
   it("keeps the typed VAT number distinct from the recorded one", () => {
     expect(p).toMatch(/without the two-letter country prefix/)
     expect(p).toMatch(/record .*with (its|the) prefix/i)
+  })
+
+  it("drives the VIES member-state dropdown with select_option", () => {
+    expect(p).toContain("select_option")
+  })
+
+  // Base says "record the moment you confirm"; a vendor row is only whole after every check.
+  it("makes a vendor row one row, written after the checks are done", () => {
+    expect(p).toMatch(/exactly once/)
+    expect(p).toMatch(/registry page that establishes the legal identity/)
   })
 
   it("does not leak the compliance schema", () => {

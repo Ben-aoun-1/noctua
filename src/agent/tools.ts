@@ -43,6 +43,13 @@ const SETTLE_TIMEOUT_MS = 5_000
 const NAV_GRACE_MS = 600
 /** Reading an element's own text should be instant — it was located a moment ago. */
 const LABEL_TIMEOUT_MS = 2_000
+/**
+ * Per matcher attempt in `select_option`. Short on purpose: `locate` has already proved the
+ * element is there, so this only bounds "does an option match?" — and a wrong guess is tried
+ * twice (label, then value), which at the full action timeout would cost the model 20 seconds
+ * before it learns which choices exist.
+ */
+const SELECT_MATCH_TIMEOUT_MS = 3_000
 /** Roughly one viewport-ish nudge: enough to reveal new content, small enough not to skip past it. */
 const SCROLL_PIXELS = 600
 /** Long enough for a wheel event to be applied; spent in full only when the page cannot move. */
@@ -107,6 +114,24 @@ export const toolDefs: Anthropic.Tool[] = [
     },
   },
   {
+    name: "select_option",
+    description:
+      "Choose a value in one numbered dropdown from the current page listing. The listing shows each dropdown's choices after \"options:\" — pass one of those labels. Selecting a value does not submit the form.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["ref", "option", "why"],
+      properties: {
+        ref: { type: "integer", description: "The [n] number of the dropdown to set." },
+        option: {
+          type: "string",
+          description: "The choice to select, exactly as the listing spells it.",
+        },
+        why: { type: "string", description: "One short clause on why this choice." },
+      },
+    },
+  },
+  {
     name: "scroll",
     description:
       "Scroll the page by about one screen. Use it when the listing mentions content you cannot see in the screenshot, or to reach a page's footer.",
@@ -151,7 +176,7 @@ export const toolDefs: Anthropic.Tool[] = [
   {
     name: "record_finding",
     description:
-      "Save one fact or one result row you have confirmed on the page. Call it once per row or fact, as soon as you read it, rather than saving everything at the end.",
+      "Save one fact or one result row you have confirmed on the page. Call it once per row or fact, as soon as you read it, rather than saving everything at the end. When the task defines a schema, use exactly those field names; otherwise choose clear flat names of your own. Always include a source field with the URL you read it from.",
     input_schema: {
       type: "object",
       additionalProperties: false,
@@ -262,6 +287,43 @@ async function typeInto(args: Record<string, unknown>, ctx: ToolCtx): Promise<To
   return { summary: `${typed} and submitted` }
 }
 
+/**
+ * Sets a `<select>`. Native dropdowns cannot be driven by clicking — the option list is rendered
+ * by the OS, not the page — so without this tool a form like the VIES member-state picker is
+ * unreachable. Both matchers are tried because the listing shows the model labels, while a page's
+ * own instructions (or a URL the model has already seen) may name the underlying value.
+ */
+async function selectOption(args: Record<string, unknown>, ctx: ToolCtx): Promise<ToolOutcome> {
+  const ref = readRef(args)
+  const option = String(args.option ?? "")
+  const element = await locate(ctx.page, ref)
+  // A change handler can navigate, so this goes through the same settle-and-recheck path as a
+  // click: the destination of a jurisdiction picker deserves the same URL guard as a link.
+  await actAndSettle(ctx, async () => {
+    try {
+      await element.selectOption({ label: option }, { timeout: SELECT_MATCH_TIMEOUT_MS })
+    } catch {
+      try {
+        await element.selectOption({ value: option }, { timeout: SELECT_MATCH_TIMEOUT_MS })
+      } catch {
+        throw new Error(await noSuchOption(element, ref, option))
+      }
+    }
+  })
+  return { summary: `selected ${JSON.stringify(option)} in [${ref}]` }
+}
+
+/** Turns "that option does not exist" into a message the model can act on next turn. */
+async function noSuchOption(element: Locator, ref: number, option: string): Promise<string> {
+  const labels = (await element.locator("option").allTextContents().catch(() => []))
+    .map((label) => label.replace(/\s+/g, " ").trim())
+    .filter((label) => label !== "")
+  if (labels.length === 0) {
+    return `[${ref}] is not a dropdown, or has no options to choose from`
+  }
+  return `no option ${JSON.stringify(option)} in [${ref}] — the choices are: ${labels.join(" | ")}`
+}
+
 async function scroll(args: Record<string, unknown>, ctx: ToolCtx): Promise<ToolOutcome> {
   const direction = args.direction
   if (direction !== "up" && direction !== "down") {
@@ -336,6 +398,7 @@ const executors: Record<string, Executor> = {
   navigate,
   click,
   type: typeInto,
+  select_option: selectOption,
   scroll,
   go_back: goBack,
   wait,
@@ -478,7 +541,9 @@ async function locate(page: Page, ref: number): Promise<Locator> {
   // Without this the action would burn its full timeout before failing, and the model would be
   // told "timeout" when the real answer is "that number is from an older page".
   if ((await element.count()) === 0) {
-    throw new Error(`stale ref [${ref}] — element not found; take a new look at the page`)
+    throw new Error(
+      `stale ref [${ref}] — element not found; the page has changed; use the numbers from the LATEST element listing`,
+    )
   }
   return element
 }

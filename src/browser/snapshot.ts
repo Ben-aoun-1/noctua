@@ -94,6 +94,17 @@ function collectElements({ maxElements, maxName }: { maxElements: number; maxNam
   }
 
   const nameOf = (el: HTMLElement): string => {
+    // A native dropdown renders its options outside the page, so neither the screenshot nor a
+    // click can reveal them. Naming the choices here is what makes `select_option` usable at
+    // all — and `clean` still enforces the length cap, so a 200-option list cannot run away.
+    if (el.tagName.toLowerCase() === "select") {
+      const label =
+        clean(el.getAttribute("aria-label")) || clean(el.getAttribute("name")) || "select"
+      const options = Array.from((el as HTMLSelectElement).options)
+        .map((option) => clean(option.textContent))
+        .filter((text) => text !== "")
+      return options.length === 0 ? label : clean(`${label} — options: ${options.join("|")}`)
+    }
     const isPassword =
       el.tagName.toLowerCase() === "input" &&
       (el.getAttribute("type") ?? "").toLowerCase() === "password"

@@ -49,6 +49,14 @@ describe("snapshot", () => {
     expect(search.name.length).toBeLessThanOrEqual(80)
   })
 
+  it("names a dropdown by its choices, so the model can pick one without opening it", async () => {
+    await bp.page.goto(fx.baseUrl + "/registry.html")
+    const snap = await capture(bp.page)
+    const select = snap.elements.find((e) => e.role === "combobox")!
+    expect(select.name).toBe("jurisdiction — options: England and Wales|Scotland")
+    expect(select.name.length).toBeLessThanOrEqual(80)
+  })
+
   it("renders URL, TITLE and one line per element", async () => {
     await bp.page.goto(fx.baseUrl + "/index.html")
     const snap = await capture(bp.page)
