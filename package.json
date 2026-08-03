@@ -3,10 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/main.ts",
+    "dev": "node --env-file-if-exists=.env --import tsx --watch src/main.ts",
     "build": "tsc -p tsconfig.json && npm --prefix web run build",
     "test": "vitest run",
-    "start": "node dist/main.js"
+    "start": "node --env-file-if-exists=.env dist/main.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
