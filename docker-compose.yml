@@ -1,0 +1,40 @@
+services:
+  noctua:
+    build: .
+    image: noctua:latest
+    container_name: noctua
+    restart: unless-stopped
+
+    # Chromium is the memory: one tab with a large page, plus screenshot encoding, plus two runs
+    # allowed at once by default (NOCTUA_MAX_CONCURRENT). 2 GB is comfortable for that and small
+    # enough that a runaway page cannot take the host down with it.
+    mem_limit: 2g
+
+    # Chromium's default /dev/shm inside a container is 64 MB, which it will crash on. The launch
+    # flags already pass --disable-dev-shm-usage, so this is belt and braces — and the belt is what
+    # keeps rendering off the disk-backed fallback.
+    shm_size: 1g
+
+    # The API key, the access code and every budget. Nothing sensitive is baked into the image.
+    env_file: .env
+
+    # Loopback only. A reverse proxy on the host terminates TLS and forwards to this port; binding
+    # 0.0.0.0 would publish an agent that spends money straight onto the internet, with the access
+    # code as the only thing in the way and no TLS around it.
+    ports:
+      - "127.0.0.1:8090:8080"
+
+    # Runs of record: events.jsonl and the screenshots every finding points at. The whole history,
+    # the replay and the exports are re-read from here, so it has to outlive the container.
+    volumes:
+      - ./data:/app/data
+
+    # No healthcheck block: the image declares one, Docker honours it as-is, and restating it here
+    # would be a second copy to keep in step with the Dockerfile. `docker compose ps` shows its
+    # verdict, and deploy.sh waits on it.
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

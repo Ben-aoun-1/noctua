@@ -1,0 +1,26 @@
+# Everything the image builds for itself, plus everything it must never carry.
+#
+# The two `node_modules` are reinstalled from the lockfiles inside the image, so copying the host's
+# would only import whatever architecture this laptop happens to be. `dist/` and `web/dist/` are
+# built in the first stage from source. `data/` is a bind mount at runtime — baking a copy of it in
+# would ship somebody's run screenshots inside the image. `.env` holds the API key.
+
+node_modules
+web/node_modules
+dist
+web/dist
+data
+.env
+.git
+.gitignore
+.superpowers
+tests
+docs
+scripts
+
+# Not build inputs, and a stale one confuses `docker build` context caching more than it helps.
+Dockerfile
+.dockerignore
+docker-compose.yml
+deploy.sh
+README.md
