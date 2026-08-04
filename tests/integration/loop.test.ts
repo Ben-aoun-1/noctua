@@ -13,7 +13,7 @@ import {
 } from "../../src/agent/llm.js"
 import { config } from "../../src/config.js"
 import type { AgentEvent, RunStatus } from "../../src/events/types.js"
-import type { ApprovalDecision } from "../../src/runs/control.js"
+import { TIMED_OUT_ANSWER, type ApprovalDecision } from "../../src/runs/control.js"
 import { RunStore, type Run } from "../../src/runs/store.js"
 import { assertSafeUrl } from "../../src/safety/urlGuard.js"
 import { serveFixtures } from "../fixtures/serve.js"
@@ -568,7 +568,177 @@ describe("the agent loop — when things go wrong", () => {
     expect(stuck(5)).toBe(true)
     // Turn 7 sees the new finding: progress, so the note is gone.
     expect(stuck(6)).toBe(false)
+    // Sitting on one page is this note's business alone: the oscillation check is about a run
+    // that keeps moving and gets nowhere, and must not double up on a run that never moved.
+    expect(observation(spy.requests[4]!)).not.toContain("returned to this page")
     expect(of("done")[0]!.outcome).toBe("partial")
+  })
+
+  it("tells the model when it keeps coming back to a page it has already read", async () => {
+    const a = `${fx.baseUrl}/registry.html`
+    const b = `${fx.baseUrl}/vendor.html`
+    const go = (url: string) => ({ toolName: "navigate", toolInput: { url } })
+    const { spy, of } = await drive([
+      go(a),
+      go(b),
+      go(a),
+      go(b),
+      go(a),
+      { toolName: "record_finding", toolInput: { data: { a: "1" } } },
+      { toolName: "finish", toolInput: { outcome: "partial", summary: "Round and round." } },
+    ])
+    const circling = (i: number) => observation(spy.requests[i]!).includes("returned to this page")
+    // Turns 1-5 open on about:blank, A, B, A, B: the third visit to A is what turn 6 opens on.
+    expect([circling(0), circling(1), circling(2), circling(3), circling(4)]).toEqual([
+      false,
+      false,
+      false,
+      false,
+      false,
+    ])
+    expect(observation(spy.requests[5]!)).toContain(
+      "You have returned to this page 3 times without recording anything new — either record " +
+        "what you have or move on.",
+    )
+    // The page kept changing, so the stuck check saw progress the whole way: this is the note it
+    // cannot produce, not a second wording of it.
+    expect(observation(spy.requests[5]!)).not.toContain("You appear stuck")
+    // Turn 7 opens on the same page again, but a finding has landed since that first visit.
+    expect(circling(6)).toBe(false)
+    expect(of("done")[0]!.outcome).toBe("partial")
+  })
+})
+
+/**
+ * A public demo link is abandoned mid-run all the time — a tab closes on an approval prompt and
+ * nothing is ever going to answer it. Every gate the loop waits on therefore has a clock on it,
+ * because the alternative is a run that holds a concurrency slot until the process restarts.
+ */
+describe("the agent loop — when nobody is at the keyboard", () => {
+  /** Long enough to be a real await, short enough to keep the suite fast. */
+  const WAIT_MS = 50
+  const maxWallMinutes = config.maxWallMinutes
+  afterEach(() => {
+    config.maxWallMinutes = maxWallMinutes
+  })
+
+  it("gives up on an abandoned approval, treats it as denied and lets the model carry on", async () => {
+    const url = `${fx.baseUrl}/registry.html`
+    const { run, spy, of, statuses } = await drive(
+      [
+        { toolName: "navigate", toolInput: { url } },
+        { toolName: "finish", toolInput: { outcome: "partial", summary: "Nobody was there." } },
+      ],
+      (r) => {
+        r.control.mode = "approve"
+        // The first proposal is abandoned on purpose; only the second is ever decided.
+        let seen = 0
+        on(r, "action_proposed", () => {
+          if (seen++ > 0) r.control.resolveApproval("approved")
+        })
+      },
+      { waitMs: WAIT_MS },
+    )
+    expect(of("action_proposed").map((e) => e.tool)).toEqual(["navigate", "finish"])
+    // The abandoned action really did not run.
+    expect(of("action_started").map((e) => e.tool)).toEqual(["finish"])
+    expect(observation(spy.requests[1]!)).toContain("URL: about:blank")
+    expect(of("error")).toEqual([
+      {
+        type: "error",
+        message: expect.stringContaining("treating this action as denied"),
+        recoverable: true,
+      },
+    ])
+    expect(transcript(spy.requests[1]!)).toContain("Nobody was available to approve this action")
+    expect(statuses).toContain("awaiting_approval")
+    expect(of("done")).toEqual([
+      { type: "done", outcome: "partial", summary: "Nobody was there." },
+    ])
+    expect(run.status).toBe("finished")
+  })
+
+  it("gives up on an unanswered question and tells the model to carry on without one", async () => {
+    const { run, spy, of, statuses } = await drive(
+      [
+        { toolName: "ask_human", toolInput: { question: "Which Glowbar?" } },
+        {
+          toolName: "finish",
+          toolInput: { outcome: "partial", summary: "Went with the London one." },
+        },
+      ],
+      () => {},
+      { waitMs: WAIT_MS },
+    )
+    expect(of("ask_human")).toHaveLength(1)
+    // Nobody answered, so there is no answer to show in the cockpit.
+    expect(of("human_answer")).toEqual([])
+    expect(statuses).toContain("awaiting_human")
+    expect(of("error")).toEqual([
+      {
+        type: "error",
+        message: expect.stringContaining("No answer after"),
+        recoverable: true,
+      },
+    ])
+    // The sentinel *is* the tool result: the model reads why it is on its own.
+    expect(transcript(spy.requests[1]!)).toContain(TIMED_OUT_ANSWER)
+    expect(of("done")).toEqual([
+      { type: "done", outcome: "partial", summary: "Went with the London one." },
+    ])
+    expect(run.status).toBe("finished")
+  })
+
+  it("cancels the clock when the decision and the answer do arrive", async () => {
+    const { of } = await drive(
+      [
+        { toolName: "ask_human", toolInput: { question: "Which Glowbar?" } },
+        { toolName: "navigate", toolInput: { url: `${fx.baseUrl}/registry.html` } },
+        { toolName: "finish", toolInput: { outcome: "success", summary: "The London one." } },
+      ],
+      (r) => {
+        r.control.mode = "approve"
+        decideOn(r)
+        on(r, "ask_human", () => r.control.answerHuman("the London one"))
+      },
+      { waitMs: WAIT_MS },
+    )
+    // Every turn after the first outlives the wait window, so a timer left running would have
+    // denied a later action or spoken over a real answer.
+    expect(of("human_answer")).toEqual([{ type: "human_answer", text: "the London one" }])
+    expect(of("error")).toEqual([])
+    expect(of("action_started").map((e) => e.tool)).toEqual(["ask_human", "navigate", "finish"])
+  })
+
+  it("ends a run whose wall-clock budget went on the wait, at the next turn", async () => {
+    // `runAgent` starts its own clock a few microseconds after this line, so this stands in for it.
+    const startedAt = Date.now()
+    const { run, spy, of } = await drive(
+      [
+        { toolName: "ask_human", toolInput: { question: "Which Glowbar?" } },
+        { toolName: "record_finding", toolInput: { data: { a: "1" } } },
+      ],
+      (r) =>
+        on(r, "ask_human", () => {
+          // A budget only the wait itself can exhaust: not spent at this instant, certainly spent
+          // once the question times out.
+          config.maxWallMinutes = (Date.now() - startedAt + WAIT_MS / 2) / 60_000
+        }),
+      { waitMs: WAIT_MS },
+    )
+    // Turn 1 was inside the budget; the time spent waiting is what put the run over it.
+    expect(observation(spy.requests[0]!)).not.toContain("BUDGET EXHAUSTED")
+    expect(observation(spy.requests[1]!)).toContain("BUDGET EXHAUSTED")
+    expect(of("done")).toEqual([
+      {
+        type: "done",
+        outcome: "partial",
+        summary: "Budget exhausted. 1 finding(s) were preserved.",
+      },
+    ])
+    expect(run.status).toBe("finished")
+    // The run ended itself: no third turn was ever asked for, and no human ever came back.
+    expect(spy.requests).toHaveLength(2)
   })
 })
 

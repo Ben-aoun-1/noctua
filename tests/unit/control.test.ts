@@ -2,7 +2,12 @@ import { describe, it, expect } from "vitest"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { RunControl, STOPPED_ANSWER, SUPERSEDED_ANSWER } from "../../src/runs/control.js"
+import {
+  RunControl,
+  STOPPED_ANSWER,
+  SUPERSEDED_ANSWER,
+  TIMED_OUT_ANSWER,
+} from "../../src/runs/control.js"
 import { RunStore, persistRun } from "../../src/runs/store.js"
 
 const freshDir = () => mkdtempSync(join(tmpdir(), "noctua-"))
@@ -143,6 +148,21 @@ describe("RunControl", () => {
     expect(SUPERSEDED_ANSWER).not.toBe(STOPPED_ANSWER)
     c.answerHuman("here you go")
     expect(await q2).toBe("here you go")
+  })
+
+  it("keeps its three sentinel answers distinct, and says what to do in the one the model reads", async () => {
+    // The loop dispatches on identity: two sentinels that collided would end a run as stopped when
+    // it was only superseded, or hand the model "(run stopped)" as an answer to act on.
+    const sentinels = [STOPPED_ANSWER, SUPERSEDED_ANSWER, TIMED_OUT_ANSWER]
+    expect(new Set(sentinels).size).toBe(sentinels.length)
+    // The timed-out one is not translated on the way out — it is handed to the model as the
+    // answer, so it has to tell it what to do next rather than name a state.
+    expect(TIMED_OUT_ANSWER).toMatch(/nobody answered/)
+    expect(TIMED_OUT_ANSWER).toMatch(/finish/)
+    const c = new RunControl()
+    const asked = c.askHuman()
+    c.answerHuman(TIMED_OUT_ANSWER)
+    expect(await asked).toBe(TIMED_OUT_ANSWER)
   })
 })
 

@@ -5,7 +5,7 @@ import { createBrowserPage, type BrowserPage } from "../browser/session.js"
 import { capture, snapshotText } from "../browser/snapshot.js"
 import { config } from "../config.js"
 import type { AgentEvent, RunStatus } from "../events/types.js"
-import { STOPPED_ANSWER, SUPERSEDED_ANSWER } from "../runs/control.js"
+import { STOPPED_ANSWER, SUPERSEDED_ANSWER, TIMED_OUT_ANSWER } from "../runs/control.js"
 import { persistRun, type Run } from "../runs/store.js"
 import { assertSafeUrl } from "../safety/urlGuard.js"
 import { History } from "./history.js"
@@ -35,6 +35,10 @@ import { executeTool, isGuarded, toolDefs, type ToolOutcome } from "./tools.js"
 
 /** Turns with no page change and no new finding before the model is told it looks stuck. */
 const STUCK_TURNS = 4
+/** How many recent page changes the going-in-circles check looks back over. */
+const URL_WINDOW = 6
+/** Visits to one page inside that window before the model is told it is going in circles. */
+const OSCILLATION_VISITS = 3
 /** Consecutive turns with no tool call before the run is given up on. */
 const MAX_NO_TOOL_TURNS = 3
 /** The inert page: the tab starts here, and it is where a blocked page is swapped for. */
@@ -42,16 +46,28 @@ const BLANK = "about:blank"
 
 const NO_TOOL_RESULT = "No tool was called. Continue with exactly one tool call, or call finish."
 const DENIED_RESULT = "The user DENIED this action. Choose a different approach."
+/** A denial nobody typed: the model is told the difference, because the fix is a different one. */
+const UNATTENDED_RESULT =
+  "Nobody was available to approve this action, so it was NOT run. Take an approach that needs " +
+  "no approval, or call finish with what you have."
 const SUPERSEDED_RESULT = "(the question was superseded — continue)"
 const STUCK_NOTE =
   `You appear stuck (no page change or new findings for ${STUCK_TURNS} turns). ` +
   "Reconsider your approach or ask_human."
+/** Going in circles is not being stuck: the page keeps changing, and nothing is gained by it. */
+const oscillationNote = (visits: number): string =>
+  `You have returned to this page ${visits} times without recording anything new — either ` +
+  "record what you have or move on."
 /** Quoted verbatim in the system prompt, so the model has been told what this line means. */
 const BUDGET_NOTE = "BUDGET EXHAUSTED — you MUST call finish now with what you have."
 const REDIRECT_NOTE =
   "The previous page redirected somewhere disallowed and was closed — you are back on a " +
   "blank tab. Do not go there again."
 const REFUSAL_MESSAGE = "The model declined this task for safety reasons."
+const approvalTimeoutMessage = (ms: number): string =>
+  `No approval decision after ${waitLabel(ms)} — treating this action as denied.`
+const questionTimeoutMessage = (ms: number): string =>
+  `No answer after ${waitLabel(ms)} — the agent was told to carry on without one.`
 /** How much of a step summary survives into the condensed history. */
 const MAX_SUMMARY_LINE_CHARS = 90
 
@@ -66,6 +82,12 @@ export interface LoopOpts {
    * re-check below and by every tool that navigates, so a run has exactly one policy.
    */
   checkUrl?: (url: string) => Promise<void>
+  /**
+   * How long to wait for an approval decision or an answer before giving up on the human,
+   * defaulting to `config.waitMinutes`. Tests pass milliseconds so the abandoned-gate paths run in
+   * the time an assertion can afford.
+   */
+  waitMs?: number
 }
 
 export async function runAgent(run: Run, llm: LLM, opts: LoopOpts = {}): Promise<void> {
@@ -99,6 +121,7 @@ export async function runAgent(run: Run, llm: LLM, opts: LoopOpts = {}): Promise
   }
   const saveShot = opts.saveShot ?? defaultSaveShot(run)
   const checkUrl = opts.checkUrl ?? assertSafeUrl
+  const waitMs = opts.waitMs ?? config.waitMinutes * 60_000
 
   setStatus("running")
 
@@ -112,6 +135,8 @@ export async function runAgent(run: Run, llm: LLM, opts: LoopOpts = {}): Promise
   let lastUrl = ""
   let lastFindingCount = 0
   let stuckTurns = 0
+  /** The last {@link URL_WINDOW} page changes, each with the finding count at the time. */
+  let visits: { url: string; findingsThen: number }[] = []
   let noToolTurns = 0
   let budgetWarned = false
 
@@ -123,17 +148,26 @@ export async function runAgent(run: Run, llm: LLM, opts: LoopOpts = {}): Promise
      * The `ask_human` tool's side of the conversation. The resolver is registered *before* the
      * event goes out, because `RunControl` drops an answer that arrives before anything is
      * waiting for it — and the answer can arrive synchronously, from a subscriber.
+     *
+     * Nobody is obliged to come back. An unanswered question is settled by the clock with an
+     * answer that says so, because a run parked here holds a concurrency slot for ever otherwise.
      */
     const askHuman = async (question: string): Promise<string> => {
       const answered = control.askHuman()
       emit({ type: "ask_human", question })
       setStatus("awaiting_human")
-      const answer = await answered
+      const { value: answer, timedOut } = await waitOrTimeout(answered, waitMs, () => {
+        control.answerHuman(TIMED_OUT_ANSWER)
+      })
       // A stop settles the question with this sentinel. Leave the status alone and let the top of
       // the loop end the run: the model will never read the tool result this turn produces.
       if (answer === STOPPED_ANSWER) return STOPPED_ANSWER
       setStatus("running")
       if (answer === SUPERSEDED_ANSWER) return SUPERSEDED_RESULT
+      if (timedOut) {
+        emit({ type: "error", message: questionTimeoutMessage(waitMs), recoverable: true })
+        return TIMED_OUT_ANSWER
+      }
       emit({ type: "human_answer", text: answer })
       return answer
     }
@@ -171,6 +205,20 @@ export async function runAgent(run: Run, llm: LLM, opts: LoopOpts = {}): Promise
       // "Same page, nothing new to show for it" is what being stuck looks like from out here.
       if (snap.url === lastUrl && findings.length === lastFindingCount) stuckTurns++
       else stuckTurns = 0
+
+      // A→B→A→B→A is progress to the check above — the page keeps changing — and waste to
+      // everyone else: a fact read and not written down is gone the moment the tab moves on, so
+      // the agent goes back for it, and back again. Only page *changes* enter the window, which
+      // leaves a run sitting on one page to the stuck check alone.
+      if (snap.url !== lastUrl) {
+        visits.push({ url: snap.url, findingsThen: findings.length })
+        visits = visits.slice(-URL_WINDOW)
+      }
+      const seen = visits.filter((v) => v.url === snap.url)
+      // Nothing banked since the first of those visits: the trips round the loop bought nothing.
+      const circling =
+        seen.length >= OSCILLATION_VISITS && seen[0]!.findingsThen === findings.length
+
       lastUrl = snap.url
       lastFindingCount = findings.length
 
@@ -183,6 +231,7 @@ export async function runAgent(run: Run, llm: LLM, opts: LoopOpts = {}): Promise
       if (blanked) notes.push(REDIRECT_NOTE)
       for (const text of steers) notes.push(`USER STEERING: ${text}`)
       if (stuckTurns >= STUCK_TURNS) notes.push(STUCK_NOTE)
+      if (circling) notes.push(oscillationNote(seen.length))
       if (over) {
         notes.push(BUDGET_NOTE)
         budgetWarned = true
@@ -253,14 +302,22 @@ export async function runAgent(run: Run, llm: LLM, opts: LoopOpts = {}): Promise
         const decided = control.requestApproval()
         emit({ type: "action_proposed", tool: result.toolName, args: result.toolInput, guarded })
         setStatus("awaiting_approval")
-        const decision = await decided
+        // An abandoned proposal is denied by the clock: the safe reading of silence is "no", and a
+        // run that waits here for ever is a demo link with one fewer slot until a restart.
+        const { value: decision, timedOut } = await waitOrTimeout(decided, waitMs, () => {
+          control.resolveApproval("denied")
+        })
         setStatus("running")
+        if (timedOut) {
+          emit({ type: "error", message: approvalTimeoutMessage(waitMs), recoverable: true })
+        }
         if (decision === "denied") {
+          const denial = timedOut ? "timed out unapproved" : "denied by user"
           history.addTurn({
             assistantContent: result.assistantContent,
             toolUseId: result.toolUseId,
-            toolResultText: DENIED_RESULT,
-            summaryLine: `step ${steps}: ${result.toolName} denied by user`,
+            toolResultText: timedOut ? UNATTENDED_RESULT : DENIED_RESULT,
+            summaryLine: `step ${steps}: ${result.toolName} ${denial}`,
           })
           continue
         }
@@ -330,6 +387,36 @@ export async function runAgent(run: Run, llm: LLM, opts: LoopOpts = {}): Promise
   } finally {
     await bp?.close().catch(() => undefined)
   }
+}
+
+/**
+ * Awaits a gate the human may simply never come back to.
+ *
+ * `settle` is the control's own resolver rather than a second promise, so the timeout resolves the
+ * very promise being awaited and leaves nothing registered behind: a decision typed a minute later
+ * finds no waiter instead of resolving something a second time. The timer is cleared on the way
+ * out either way, so an answered gate leaves no timer to fire over a later one.
+ */
+async function waitOrTimeout<T>(
+  pending: Promise<T>,
+  ms: number,
+  settle: () => void,
+): Promise<{ value: T; timedOut: boolean }> {
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    settle()
+  }, ms)
+  try {
+    return { value: await pending, timedOut }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** The wait limit as a human reads it: minutes in production, milliseconds under a test. */
+function waitLabel(ms: number): string {
+  return ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${ms} ms`
 }
 
 /**

@@ -9,6 +9,7 @@ export const config = {
   maxSteps: num(process.env.NOCTUA_MAX_STEPS, 40),
   maxRunCostUsd: num(process.env.NOCTUA_MAX_RUN_COST, 1.5),
   maxWallMinutes: num(process.env.NOCTUA_MAX_WALL_MIN, 15),
+  waitMinutes: num(process.env.NOCTUA_MAX_WAIT_MIN, 10),
   dailyCostCapUsd: num(process.env.NOCTUA_DAILY_COST_CAP, 20),
   maxConcurrentRuns: num(process.env.NOCTUA_MAX_CONCURRENT, 2),
 }

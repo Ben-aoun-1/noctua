@@ -7,6 +7,15 @@ export const STOPPED_ANSWER = "(run stopped)"
 export const SUPERSEDED_ANSWER = "(question superseded)"
 
 /**
+ * What `askHuman` resolves with when nobody answers before the loop's wait limit.
+ *
+ * Unlike the two above this one is not translated on the way out: it is handed to the model as the
+ * answer, so it has to read as an instruction rather than as a status code.
+ */
+export const TIMED_OUT_ANSWER =
+  "(nobody answered in time — proceed with your best judgement, or call finish with what you have)"
+
+/**
  * The human's side of a run: pause/resume, approval gates, questions and steering notes.
  *
  * The agent loop is the only consumer of the awaiting half (`waitWhilePaused`, `requestApproval`,
