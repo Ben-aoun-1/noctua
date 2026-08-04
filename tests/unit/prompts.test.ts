@@ -7,6 +7,7 @@ const PRESETS: Preset[] = ["vendor", "compliance", null]
 const VENDOR_KEYS = [
   "legal_name",
   "query_name",
+  "company_number",
   "vat_number",
   "vat_valid",
   "registry_status",
