@@ -12,7 +12,7 @@ Underneath it is Claude driving Playwright. No scripted routes, no site-specific
 
 ## What it actually did
 
-Every figure below is measured, from runs against the live web with `claude-sonnet-5` at `medium` effort. Full transcripts and every stumble are in [`.superpowers/sdd/2026-08-02-noctua/task-16-report.md`](.superpowers/sdd/2026-08-02-noctua/task-16-report.md); the reproducible version is [`scripts/smoke.md`](scripts/smoke.md).
+Every figure below is measured, from runs against the live web with `claude-sonnet-5` at `medium` effort. Every run, including the two that went badly and what each cost, is written up in [`docs/live-runs.md`](docs/live-runs.md); the reproducible checklist is [`scripts/smoke.md`](scripts/smoke.md).
 
 | Goal | Steps | Cost | Agent time | Result |
 | --- | ---: | ---: | ---: | --- |
