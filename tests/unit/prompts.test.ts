@@ -130,9 +130,10 @@ describe("buildSystemPrompt — shared contract", () => {
 
   // The loop appends these alongside steering notes; unexplained, they read as page content.
   // The budget note is quoted verbatim so the model recognizes the exact string it will get.
-  it.each(PRESETS)("prepares the agent for stuck and budget notes (%s)", (preset) => {
+  it.each(PRESETS)("prepares the agent for stuck, circling and budget notes (%s)", (preset) => {
     const p = buildSystemPrompt(preset)
     expect(p).toMatch(/stuck/i)
+    expect(p).toMatch(/returned to a page/i)
     expect(p).toContain("BUDGET EXHAUSTED")
   })
 
@@ -181,6 +182,14 @@ describe("buildSystemPrompt — vendor preset", () => {
     expect(p).toContain("ec.europa.eu/taxation_customs/vies")
     expect(p).toContain("find-and-update.company-information.service.gov.uk")
     expect(p.indexOf("VIES")).toBeLessThan(p.indexOf("vendor's own website"))
+  })
+
+  // The paragraph above the list says to read the vendor's own site and *then* open the registry
+  // record it writes the row from. A numbered list claiming to be "this order" with the website
+  // fourth told it the opposite, and the model has to resolve the contradiction on the fly.
+  it("lists its sources without contradicting when the row gets written", () => {
+    expect(p).not.toMatch(/in this order/i)
+    expect(p).toMatch(/before you open the registry record/i)
   })
 
   it("asks for a vendor-master table recap at the end", () => {

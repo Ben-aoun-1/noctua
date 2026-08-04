@@ -607,6 +607,40 @@ describe("the agent loop — when things go wrong", () => {
     expect(circling(6)).toBe(false)
     expect(of("done")[0]!.outcome).toBe("partial")
   })
+
+  it("catches a three-page circuit, which is what the live run actually did", async () => {
+    // The smoke run went registry record → vendor site → registry index → and round again. A
+    // window of six page changes can only ever see two laps of a two-page cycle; this is the shape
+    // the detector was built for, so it is the shape it has to catch.
+    const a = `${fx.baseUrl}/registry.html`
+    const b = `${fx.baseUrl}/vendor.html`
+    const c = `${fx.baseUrl}/index.html`
+    const go = (url: string) => ({ toolName: "navigate", toolInput: { url } })
+    const { spy, of } = await drive([
+      go(a),
+      go(b),
+      go(c),
+      go(a),
+      go(b),
+      go(c),
+      go(a),
+      { toolName: "finish", toolInput: { outcome: "partial", summary: "Three laps, no rows." } },
+    ])
+    const circling = (i: number) => observation(spy.requests[i]!).includes("returned to this page")
+    // Turns 1-7 open on about:blank, A, B, C, A, B, C: two laps, and the third A is turn 8.
+    expect([0, 1, 2, 3, 4, 5, 6].map(circling)).toEqual([
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+    ])
+    expect(observation(spy.requests[7]!)).toContain("You have returned to this page 3 times")
+    expect(observation(spy.requests[7]!)).not.toContain("You appear stuck")
+    expect(of("done")[0]!.outcome).toBe("partial")
+  })
 })
 
 /**
@@ -671,8 +705,10 @@ describe("the agent loop — when nobody is at the keyboard", () => {
       { waitMs: WAIT_MS },
     )
     expect(of("ask_human")).toHaveLength(1)
-    // Nobody answered, so there is no answer to show in the cockpit.
-    expect(of("human_answer")).toEqual([])
+    // The cockpit's whisper box is mounted by `ask_human` and taken down by `human_answer`. A
+    // question closed by the clock has to close it too, or the UI keeps soliciting an answer that
+    // nothing is waiting for — and the transcript has to say who did the closing.
+    expect(of("human_answer")).toEqual([{ type: "human_answer", text: "(no answer — timed out)" }])
     expect(statuses).toContain("awaiting_human")
     expect(of("error")).toEqual([
       {

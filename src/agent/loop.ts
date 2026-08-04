@@ -35,8 +35,14 @@ import { executeTool, isGuarded, toolDefs, type ToolOutcome } from "./tools.js"
 
 /** Turns with no page change and no new finding before the model is told it looks stuck. */
 const STUCK_TURNS = 4
-/** How many recent page changes the going-in-circles check looks back over. */
-const URL_WINDOW = 6
+/**
+ * How many recent page changes the going-in-circles check looks back over.
+ *
+ * Three visits to a page in a cycle of `k` pages take `2k + 1` changes to happen, so nine is what
+ * it costs to see a four-page circuit — and the live run that prompted all this went round three
+ * pages, which a window of six can never catch.
+ */
+const URL_WINDOW = 9
 /** Visits to one page inside that window before the model is told it is going in circles. */
 const OSCILLATION_VISITS = 3
 /** Consecutive turns with no tool call before the run is given up on. */
@@ -51,6 +57,8 @@ const UNATTENDED_RESULT =
   "Nobody was available to approve this action, so it was NOT run. Take an approach that needs " +
   "no approval, or call finish with what you have."
 const SUPERSEDED_RESULT = "(the question was superseded — continue)"
+/** What the transcript shows for a question nobody answered; it takes the whisper box down too. */
+const TIMED_OUT_ANSWER_TEXT = "(no answer — timed out)"
 const STUCK_NOTE =
   `You appear stuck (no page change or new findings for ${STUCK_TURNS} turns). ` +
   "Reconsider your approach or ask_human."
@@ -166,6 +174,11 @@ export async function runAgent(run: Run, llm: LLM, opts: LoopOpts = {}): Promise
       if (answer === SUPERSEDED_ANSWER) return SUPERSEDED_RESULT
       if (timedOut) {
         emit({ type: "error", message: questionTimeoutMessage(waitMs), recoverable: true })
+        // The cockpit mounts its whisper box on `ask_human` and takes it down on `human_answer`,
+        // so a question closed by the clock has to be closed here too — otherwise the UI goes on
+        // soliciting an answer that nothing is waiting for, and posts it into the void. The text
+        // says who closed it: the transcript is a record, not a ventriloquist act.
+        emit({ type: "human_answer", text: TIMED_OUT_ANSWER_TEXT })
         return TIMED_OUT_ANSWER
       }
       emit({ type: "human_answer", text: answer })

@@ -49,6 +49,9 @@ Run them in this order — each is a strictly bigger claim than the one before.
 - **Expect:** 8 steps · **$0.09** · **~35 s** · 1 row.
 - Row: `MONZO BANK LIMITED / 09446231 / Active / Broadwalk House, 5 Appold Street, London, England,
   EC2A 2AG`, sourced to the Companies House company page.
+- Those figures were measured **before** the prompt and loop hardening that followed the smoke runs
+  (the run that produced them left `company_number` out of the row, which is what the hardening
+  fixed). Expect the same shape and a similar cost; treat the step count as an upper bound.
 - Companies House serves the company page to a plain headless browser: no CAPTCHA, no JS wall.
   Going straight to `/company/<number>` skips the search form, so this one does not stop for
   approval either.
@@ -63,13 +66,16 @@ Run them in this order — each is a strictly bigger claim than the one before.
 - **Expect:** 8 steps · **$0.13** · ~40 s of agent time · 2 rows.
 - **This one stops and waits for you.** Searching by name means typing into a form and pressing
   Enter, which is a guarded action: the run goes `awaiting_approval` and the control bar lights up
-  APPROVE. Click it. Nothing times out while it waits, so an unattended run sits there for ever.
+  APPROVE. Click it. It does not wait for ever: after 10 minutes with no decision
+  (`NOCTUA_MAX_WAIT_MIN`) the run denies the action itself, says so in the feed, and lets the model
+  find another way — so an abandoned tab cannot hold a concurrency slot until the next restart.
 - Rows: Monzo as above, plus `STARLING BANK LIMITED / 09092149 / Active / 5th Floor London Fruit
   And Wool Exchange, 1 Duval Square, London, United Kingdom, E1 6PW`.
 
 Then hit **MD**, **CSV** and **JSON** in the report pane: the CSV opens in Excel with a
-`legal_name, company_number, …, source, step` header, one row per vendor, and `step` is the
-receipt — click that number in the UI to see the screenshot the row was read off.
+`kind, legal_name, query_name, company_number, …, source, step` header — the union of the keys the
+rows actually carry, in the order first seen, with `step` moved to the end — one row per vendor,
+and `step` is the receipt: click that number in the UI to see the screenshot the row was read off.
 
 ## 3. What "working" looks like
 
@@ -84,7 +90,7 @@ receipt — click that number in the UI to see the screenshot the row was read o
 | Spot | What you will see | Fallback |
 | --- | --- | --- |
 | Any goal needing a site search | `awaiting_approval` on the first form submit | Approve it. To avoid the pause entirely, give the company **number** and let it go straight to `/company/<number>` (goal B). |
-| `ask_human` on an ambiguous goal | Run parks in `awaiting_human`, nothing times out | Answer in the whisper box. Naming the exact company and jurisdiction in the goal prevents it. |
+| `ask_human` on an ambiguous goal | Run parks in `awaiting_human`; after 10 minutes it answers itself ("no answer — timed out") and carries on with its own judgement | Answer in the whisper box while it is up. Naming the exact company and jurisdiction in the goal prevents the question. |
 | VIES (`ec.europa.eu/.../vies`) | Not exercised in these runs — heavier JS and rate limits than Companies House | Do not demo a VAT check cold. Companies House is the reliable registry; VAT validity legitimately reports `unknown`. |
 | Multi-page gathering | Agent must be *on* the registry page when it writes the row, or it re-fetches pages it already read | Keep goals to one registry per vendor. If it starts revisiting pages, steer: "record what you already have". |
 | A stale `NOCTUA_FAKE=1` server | Run "succeeds" in ~10 s with Glowbar Ltd findings it never visited | That is the scripted demo. Kill every `src/main.ts` and restart (§1). |
@@ -107,5 +113,8 @@ live runs do.
 
 ## 6. Budget
 
-Daily cap is $20 (`NOCTUA_DAILY_COST_CAP`), per-run $1.50 / 40 steps / 15 minutes. The three goals
+Daily cap is $20 (`NOCTUA_DAILY_COST_CAP`), per-run $1.50 / 40 steps / 15 minutes
+(`NOCTUA_MAX_RUN_COST`, `NOCTUA_MAX_STEPS`, `NOCTUA_MAX_WALL_MIN`), and 10 minutes on any one
+approval or question before the run settles it itself (`NOCTUA_MAX_WAIT_MIN`) — that wait is spent
+wall-clock time like any other, so a run left parked still ends on its own budget. The three goals
 above cost **$0.30 together**. Rehearse as often as you like.

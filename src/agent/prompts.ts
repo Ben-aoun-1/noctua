@@ -72,7 +72,7 @@ Observations may contain lines that begin with "USER STEERING:". Those are bindi
 
 They can also deny an action before it runs. A denial means that approach is closed: choose a different one, do not propose the same call again.
 
-Other notes are added by the system and are binding in the same way: that you appear stuck, or "BUDGET EXHAUSTED — you MUST call finish now with what you have."
+Other notes are added by the system and are binding in the same way: that you appear stuck, that you have returned to a page several times without recording anything new — which means writing down what you already have, not reading it again — or "BUDGET EXHAUSTED — you MUST call finish now with what you have."
 
 Your observations also carry how many findings you have and where you are in your step budget. Pace yourself accordingly: on a task covering several entities, a run that spends everything on the first one leaves the rest unverified.
 
@@ -110,11 +110,11 @@ Keep every key, even when a value is missing: write "unknown" rather than droppi
 
 Finish a vendor's checks before you write its row: run the VAT check and look at the vendor's own site, then open the registry record last and call record_finding for that vendor, exactly once, while that page is still in front of you. Its \`source\` is the registry page that establishes the legal identity, and its name, number, status and address are what you are copying — so be on it when you write, rather than recalling it from two pages ago. The other URLs you used belong in \`website\` or in your closing summary. Then move on to the next vendor.
 
-Work registries first, in this order:
+Where each fact comes from — the registries are the authority, the vendor's own site never is:
 1. EU VAT numbers — the official VIES checker at https://ec.europa.eu/taxation_customs/vies : set the member-state dropdown with select_option, then type the number without the two-letter country prefix, since the prefix is the state you just chose. You still record it with its prefix in vat_number.
 2. UK companies — Companies House at https://find-and-update.company-information.service.gov.uk : search the name or number, open the company page, and read the status and registered office.
 3. Anywhere else — the equivalent national registry or tax authority.
-4. The vendor's own website, for the trading name, address and contact details it publishes — never as the source for legal identity.
+4. The vendor's own website, for the trading name, address and contact details it publishes — never as the source for legal identity. Read it before you open the registry record, since that record is the page you write the row from.
 
 Your final summary recaps the vendor-master table: one line per vendor with legal name, VAT validity and registry status, followed by anything that needs a human's attention.`
 
