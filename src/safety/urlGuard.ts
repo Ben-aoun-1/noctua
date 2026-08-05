@@ -33,6 +33,24 @@ export function isPrivateIp(ip: string): boolean {
   return PRIVATE.check(addr, family === 6 ? "ipv6" : "ipv4")
 }
 
+/**
+ * Whether one request the page makes may go out, judged on the literal address alone.
+ *
+ * This is a deliberately smaller question than {@link assertSafeUrl} answers. It is asked of every
+ * subresource — images, frames, stylesheets, fetches, dozens per page — so it cannot resolve DNS:
+ * that would be a lookup on the critical path of every request, to re-apply a policy the tab's own
+ * address is already held to. What it stops is the case the navigation guard structurally cannot
+ * see, because the tab never moves: a page that embeds `http://169.254.169.254/latest/meta-data/`
+ * and has the browser photograph cloud credentials into the model's context, the event log and the
+ * exports on its behalf.
+ */
+export function allowPublicRequest(url: string): boolean {
+  let u: URL
+  try { u = new URL(url) } catch { return false }
+  // Not an IP literal (a hostname, or no host at all as in `data:`) is not this check's business.
+  return !isPrivateIp(u.hostname)
+}
+
 export async function assertSafeUrl(url: string): Promise<void> {
   let u: URL
   try { u = new URL(url) } catch { throw new Error(`blocked: invalid URL`) }

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type Anthropic from "@anthropic-ai/sdk"
 import { runAgent, type LoopOpts } from "../../src/agent/loop.js"
+import { createBrowserPage } from "../../src/browser/session.js"
 import {
   FakeLLM,
   type LLM,
@@ -15,7 +16,7 @@ import { config } from "../../src/config.js"
 import type { AgentEvent, RunStatus } from "../../src/events/types.js"
 import { TIMED_OUT_ANSWER, type ApprovalDecision } from "../../src/runs/control.js"
 import { RunStore, type Run } from "../../src/runs/store.js"
-import { assertSafeUrl } from "../../src/safety/urlGuard.js"
+import { allowPublicRequest, assertSafeUrl } from "../../src/safety/urlGuard.js"
 import { serveFixtures } from "../fixtures/serve.js"
 
 /**
@@ -51,6 +52,11 @@ function allowFixtureOrigin(baseUrl: string): (url: string) => Promise<void> {
     if (url === baseUrl || url.startsWith(baseUrl + "/")) return
     await assertSafeUrl(url)
   }
+}
+
+/** The same bargain for the requests the page itself makes, against the same loopback origin. */
+function allowFixtureRequest(baseUrl: string): (url: string) => boolean {
+  return (url) => url.startsWith(baseUrl + "/") || allowPublicRequest(url)
 }
 
 /** Records every request the loop makes, so the observations can be asserted on. */
@@ -112,6 +118,7 @@ async function drive(
   await runAgent(run, spy, {
     saveShot: () => SHOT,
     checkUrl: allowFixtureOrigin(fx.baseUrl),
+    allowRequest: allowFixtureRequest(fx.baseUrl),
     ...opts,
   })
   const events = run.log.readAll().map((pe) => pe.event)
@@ -866,5 +873,29 @@ describe("the agent loop — budgets and bookkeeping", () => {
       },
     ])
     expect(new RunStore(dataDir).todaysCostUsd()).toBeCloseTo(0.25, 10)
+  })
+})
+
+/**
+ * The tab is not the only thing that fetches. A page can ask the browser for an address the model
+ * never chose and the navigation guard never sees — the tab does not move — and whatever comes
+ * back is rendered into the frame that becomes the model's observation, the event log and the
+ * exported report.
+ */
+describe("the browser page — what a page pulls in", () => {
+  it("aborts an embedded private address while the page itself still renders", async () => {
+    const bp = await createBrowserPage({ allowRequest: allowFixtureRequest(fx.baseUrl) })
+    try {
+      const blocked = bp.page.waitForEvent("requestfailed", (req) =>
+        req.url().startsWith("http://169.254.169.254/"),
+      )
+      await bp.page.goto(`${fx.baseUrl}/embedded.html`)
+      expect((await blocked).failure()?.errorText).toContain("BLOCKED")
+      // Not a blanket refusal: the page the frame was embedded in came through the same
+      // interception, so a guard that broke every load would fail here rather than pass quietly.
+      expect(await bp.page.textContent("h1")).toBe("Vendor notes")
+    } finally {
+      await bp.close()
+    }
   })
 })

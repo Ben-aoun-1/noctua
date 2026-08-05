@@ -67,7 +67,8 @@ const SECTIONS: Section[] = [
       "or payment wall back to you instead. Filling in a field and pressing Enter to submit it " +
       "stops for your approval even in autopilot, and approve-each-step gates every action there " +
       "is. Every run carries a hard ceiling on steps, on cost and on minutes, and stops when one " +
-      "is reached. Addresses on private networks are refused before a tab is opened.",
+      "is reached. Addresses on private networks are refused before a tab is opened, and a page " +
+      "that tries to pull one in by its numbers is refused that too.",
   },
   {
     head: "WHEN IT GETS STUCK",

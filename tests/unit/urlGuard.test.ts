@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest"
-import { assertSafeUrl, isPrivateIp } from "../../src/safety/urlGuard.js"
+import { allowPublicRequest, assertSafeUrl, isPrivateIp } from "../../src/safety/urlGuard.js"
 
 // Only the two fake hosts below are stubbed; every other lookup hits the real resolver,
 // so the public-site test still exercises real DNS.
@@ -50,6 +50,40 @@ describe("urlGuard", () => {
       await expect(assertSafeUrl(url)).rejects.toThrow(/^blocked: host /))
   it("rejects an unparseable url", async () =>
     await expect(assertSafeUrl("not a url")).rejects.toThrow(/^blocked: invalid URL$/))
+})
+
+/**
+ * The subresource question, which is a smaller one on purpose: it is asked of every image, frame
+ * and fetch a page makes, so it cannot spend a DNS lookup on each. What it stops is the direct
+ * hit — an embedded `http://169.254.169.254/…` whose pixels would otherwise be photographed into
+ * the model's context, the event log and the exports.
+ */
+describe("urlGuard — what a page may pull in", () => {
+  it.each([
+    "http://169.254.169.254/latest/meta-data/",
+    "http://127.0.0.1:8080/admin",
+    "https://10.0.0.1/",
+    "http://[::1]/",
+    "http://[::ffff:169.254.169.254]/",
+  ])("refuses %s", (url) => expect(allowPublicRequest(url)).toBe(false))
+
+  it.each([
+    "https://example.com/logo.png",
+    "https://find-and-update.company-information.service.gov.uk/company/09446231",
+    "http://[2606:2800:220:1:248:1893:25c8:1946]/",
+    "data:image/gif;base64,R0lGODlhAQABAAAAACw=",
+    "about:blank",
+  ])("allows %s", (url) => expect(allowPublicRequest(url)).toBe(true))
+
+  // The honest limit of a check that must not resolve DNS. The address the *tab* is on is where
+  // that policy is applied, by `assertSafeUrl`, which does resolve.
+  it("does not chase a hostname that resolves somewhere private", () => {
+    expect(allowPublicRequest("http://ssrf-metadata.example/")).toBe(true)
+  })
+
+  it("refuses a request whose url is not one", () => {
+    expect(allowPublicRequest("not a url")).toBe(false)
+  })
 })
 
 describe("urlGuard DNS resolution (stubbed resolver)", () => {

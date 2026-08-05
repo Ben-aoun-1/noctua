@@ -91,6 +91,12 @@ export interface LoopOpts {
    */
   checkUrl?: (url: string) => Promise<void>
   /**
+   * The subresource half of that policy: whether a request the *page* makes may go out, defaulting
+   * to `allowPublicRequest`. Injected by tests for the same reason `checkUrl` is — their fixture
+   * site is served from an address the real policy refuses.
+   */
+  allowRequest?: (url: string) => boolean
+  /**
    * How long to wait for an approval decision or an answer before giving up on the human,
    * defaulting to `config.waitMinutes`. Tests pass milliseconds so the abandoned-gate paths run in
    * the time an assertion can afford.
@@ -149,7 +155,7 @@ export async function runAgent(run: Run, llm: LLM, opts: LoopOpts = {}): Promise
   let budgetWarned = false
 
   try {
-    bp = await createBrowserPage()
+    bp = await createBrowserPage({ allowRequest: opts.allowRequest })
     const page = bp.page
 
     /**
