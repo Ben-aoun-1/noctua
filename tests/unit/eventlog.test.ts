@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 import { RunEventLog } from "../../src/events/log.js"
-import { existsSync, mkdtempSync } from "node:fs"
+import { appendFileSync, existsSync, mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -57,6 +57,37 @@ describe("RunEventLog", () => {
     const seen: number[] = []
     log.subscribe(0, (pe) => seen.push(pe.seq))
     expect(seen).toEqual([1])
+  })
+
+  /**
+   * A process killed part-way through an append leaves half a line at the end of the file — and
+   * `readAll` runs inside the constructor, so one torn byte used to make the whole run unreadable:
+   * both `/events` and `/export` answered 500, for ever, for a run whose findings were all safely
+   * on the lines above. Only lines that will not parse are dropped; an event this build does not
+   * recognise is still an event.
+   */
+  it("reads a log whose last line was cut off mid-write", () => {
+    const dir = freshDir()
+    const log = new RunEventLog("r7", dir)
+    log.append({ type: "run_status", status: "running" })
+    log.append({ type: "finding", data: { vendor: "acme" }, step: 1 })
+    appendFileSync(join(log.dir, "events.jsonl"), '{"seq":3,"ts":1700000000000,"ev')
+
+    const reopened = new RunEventLog("r7", dir)
+    expect(reopened.readAll().map((pe) => pe.seq)).toEqual([1, 2])
+    expect(reopened.readAll()[1]!.event).toEqual({
+      type: "finding",
+      data: { vendor: "acme" },
+      step: 1,
+    })
+  })
+
+  it("keeps an event whose type this build has never heard of", () => {
+    const dir = freshDir()
+    const log = new RunEventLog("r8", dir)
+    const line = { seq: 1, ts: 1_700_000_000_000, event: { type: "from_the_future", note: "hi" } }
+    appendFileSync(join(log.dir, "events.jsonl"), JSON.stringify(line) + "\n")
+    expect(new RunEventLog("r8", dir).readAll()).toEqual([line])
   })
 
   it("isolates a throwing subscriber from other subscribers and from append", () => {

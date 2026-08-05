@@ -48,12 +48,30 @@ export class RunEventLog {
     }
   }
 
+  /**
+   * Every event on the file, skipping any line that will not parse.
+   *
+   * There is exactly one way to write a line here — `JSON.stringify` then a newline — so a line
+   * that will not parse is a line that was not finished: the process was killed part-way through
+   * the append. Reading is also the constructor's first act, so before this guard a single torn
+   * byte at the end of a run made the whole of it unreadable — `/events` and `/export` both 500,
+   * permanently, over a run whose findings were all safely on the lines above.
+   *
+   * Parse failure is the only thing dropped. An event of a type this build does not recognise is
+   * still an event that happened, and is passed on to whoever is replaying the run.
+   */
   readAll(): PersistedEvent[] {
     if (!existsSync(this.file)) return []
-    return readFileSync(this.file, "utf8")
-      .split("\n")
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as PersistedEvent)
+    const events: PersistedEvent[] = []
+    for (const line of readFileSync(this.file, "utf8").split("\n")) {
+      if (line.length === 0) continue
+      try {
+        events.push(JSON.parse(line) as PersistedEvent)
+      } catch {
+        // a torn tail; the events before it are the run
+      }
+    }
+    return events
   }
 
   /** One bad consumer (dead SSE socket, UI bug) must not stall the run or the other consumers. */

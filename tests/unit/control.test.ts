@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -234,6 +242,31 @@ describe("RunStore", () => {
     })
   })
 
+  /**
+   * meta.json is rewritten after every status change and every turn's cost update, and a run that
+   * vanishes from the history because the process died mid-write is a run whose export 404s. The
+   * bytes therefore land somewhere else and the *name* is moved onto them, which is the one file
+   * operation a crash cannot catch half-done.
+   */
+  it("replaces meta.json whole rather than rewriting it in place", () => {
+    const dir = freshDir()
+    const store = new RunStore(dir)
+    const run = store.create("audit", null)
+    const meta = join(run.log.dir, "meta.json")
+    // A second name for the bytes that are there now: a write *through* meta.json would change
+    // what this link reads, a rename only changes which bytes the name meta.json points at.
+    const before = join(dir, "before.json")
+    linkSync(meta, before)
+
+    run.status = "finished"
+    persistRun(run)
+
+    expect(JSON.parse(readFileSync(meta, "utf8")).status).toBe("finished")
+    expect(JSON.parse(readFileSync(before, "utf8")).status).toBe("pending")
+    // And the temp file was moved, not left behind for the directory walk to trip over.
+    expect(readdirSync(run.log.dir).sort()).toEqual(["meta.json", "shots"])
+  })
+
   it("lists in-memory runs newest first", () => {
     const store = new RunStore(freshDir())
     const a = store.create("first", "vendor")
@@ -284,6 +317,43 @@ describe("RunStore", () => {
     // In memory: the live run wins over the same run's meta.json.
     old.status = "stopped"
     expect(first.list().find((r) => r.id === old.id)!.status).toBe("stopped")
+  })
+
+  /**
+   * A status on disk is a claim by a process that no longer exists. `running` means the loop that
+   * wrote it was mid-turn when it died, and nothing is ever going to move it on — but the cockpit
+   * reads it as live: it offers the approve and answer buttons for a run whose control endpoints
+   * 404, hides the replay bar, and hides the exports, which are the only things left worth having.
+   */
+  it.each(["pending", "running", "awaiting_approval", "awaiting_human", "paused"])(
+    "lists a run left %s by a dead process as failed",
+    (status) => {
+      const dir = freshDir()
+      mkdirSync(join(dir, "runs", "zombie"), { recursive: true })
+      writeFileSync(
+        join(dir, "runs", "zombie", "meta.json"),
+        JSON.stringify({ id: "zombie", goal: "g", preset: null, createdAt: 1, status, costUsd: 3 }),
+      )
+      const store = new RunStore(dir)
+      // Both readers agree, because the export route reads the single one and the history the list.
+      expect(store.list()[0]!.status).toBe("failed")
+      expect(store.readMeta("zombie")!.status).toBe("failed")
+      // Only the status is reconciled: the cost was really spent, and the day's cap counts it.
+      expect(store.readMeta("zombie")!.costUsd).toBe(3)
+      // A read is a read: the file still says what the dead process last knew.
+      const raw = readFileSync(join(dir, "runs", "zombie", "meta.json"), "utf8")
+      expect(JSON.parse(raw).status).toBe(status)
+    },
+  )
+
+  it.each(["finished", "failed", "stopped"])("leaves a run that really ended %s alone", (status) => {
+    const dir = freshDir()
+    mkdirSync(join(dir, "runs", "ended"), { recursive: true })
+    writeFileSync(
+      join(dir, "runs", "ended", "meta.json"),
+      JSON.stringify({ id: "ended", goal: "g", preset: null, createdAt: 1, status, costUsd: 0 }),
+    )
+    expect(new RunStore(dir).list()[0]!.status).toBe(status)
   })
 
   it("reads a meta.json written before cost was recorded as costing nothing", () => {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -396,6 +396,20 @@ describe("export route, for a run only disk remembers", () => {
     const id = seedDiskRun()
     const res = await app.inject({ method: "GET", url: exportUrl(id, "md") })
     expect(res.statusCode).toBe(401)
+  })
+
+  /**
+   * The shape a killed process leaves behind: a final line that stops mid-object. The report is
+   * built by replaying the file, so an unreadable log is an unreadable run — and the findings on
+   * the lines above it are exactly what the run was for.
+   */
+  it("still builds a report for a run whose log was cut off mid-write", async () => {
+    const app = await newApp()
+    const id = seedDiskRun()
+    appendFileSync(join(dataDir, "runs", id, "events.jsonl"), '{"seq":13,"ts":1700000000000,"ev')
+    const res = await authed(app, { method: "GET", url: exportUrl(id, "md") })
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain("Glowbar")
   })
 
   /** Without this, every screenshot link in a report exported after a restart is a broken image. */

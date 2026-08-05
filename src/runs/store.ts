@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { RunEventLog } from "../events/log.js"
 import type { RunStatus } from "../events/types.js"
@@ -57,6 +57,22 @@ const ALL_STATUSES: readonly RunStatus[] = [...ACTIVE_STATUSES, ...TERMINAL_STAT
 /** Everything `Run["preset"]` may be on disk — the named presets plus free-form. */
 const PRESETS: readonly RunPreset[] = [...RUN_PRESETS, null]
 
+/**
+ * How a run found on disk really stands, whatever its `meta.json` says.
+ *
+ * A status is written by the loop that owns the run, and a loop that never wrote a terminal one is
+ * a loop whose process is gone: `running` on disk means "killed mid-turn", not "in flight". Read
+ * literally, every such run is live for ever — the cockpit raises an approval strip whose buttons
+ * 404 on a `RunControl` that no longer exists, and hides the replay bar and the export links, which
+ * are all that is left of the run worth having.
+ *
+ * Only runs nobody is driving reach this. A live run is served from memory: `list()` overwrites the
+ * disk entry with it, and every other reader asks the store for the live run first.
+ */
+function asAbandoned(status: RunStatus): RunStatus {
+  return TERMINAL_STATUSES.includes(status) ? status : "failed"
+}
+
 function summarize(run: Run): RunSummary {
   return {
     id: run.id,
@@ -74,9 +90,17 @@ function summarize(run: Run): RunSummary {
  * The agent loop calls it on every status change and after every budget update, because meta.json
  * is all a restarted process has: without it yesterday's finished runs list as `pending` for ever,
  * and the daily cost cap starts each restart with a fresh allowance it has already spent.
+ *
+ * Written beside and renamed onto, because it is rewritten that often: a process killed part-way
+ * through a plain overwrite leaves a truncated file, and a run whose meta.json will not parse is
+ * gone from the history and 404s on export — everything it earned, lost to a write that was only
+ * ever bookkeeping. A rename is the one file operation a crash cannot catch half-done.
  */
 export function persistRun(run: Run): void {
-  writeFileSync(join(run.log.dir, "meta.json"), JSON.stringify(summarize(run)))
+  const file = join(run.log.dir, "meta.json")
+  const pending = `${file}.tmp`
+  writeFileSync(pending, JSON.stringify(summarize(run)))
+  renameSync(pending, file)
 }
 
 /**
@@ -148,7 +172,9 @@ export class RunStore {
 
   /**
    * One run's `meta.json`, or null when there is none to read — which is how a caller asks "did
-   * this process's predecessor know about this run?" without holding it in memory.
+   * this process's predecessor know about this run?" without holding it in memory. A status that
+   * predecessor never finished is reported as {@link asAbandoned} reads it, so this and `list()`
+   * describe the same run the same way.
    *
    * `id` is joined into a path, so it must already have been checked to be a run id: the HTTP
    * layer does that at the door, and the only other caller is the directory walk below.
@@ -188,7 +214,9 @@ export class RunStore {
       goal,
       preset: preset as Run["preset"],
       createdAt,
-      status: status as RunStatus,
+      // A projection, not a repair: the file still says what the dead process last knew, and
+      // reading a run's history must not rewrite it.
+      status: asAbandoned(status as RunStatus),
       // A meta written before this process was billing (or by an older build) still lists; it
       // reports no spend rather than dropping the run from the history.
       costUsd: typeof costUsd === "number" && Number.isFinite(costUsd) ? costUsd : 0,
