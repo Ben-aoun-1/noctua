@@ -381,24 +381,35 @@ describe("api live stream", () => {
   it("delivers events appended after the client connected", async () => {
     const created = await createRun(app, { goal: GOAL, preset: null })
     const id = created.json().id as string
-    // The loop is parked inside the model turn, two events in: the status and the first shot.
     await gate.started
 
+    // How a run opens, in order — and it is not a timing question. Both are appended before the
+    // loop enters its first model turn, and `gate.started` resolves inside that turn, so a client
+    // connecting after it is owed both and nothing else until the gate is released. Asserted whole
+    // rather than as a prefix: "at least these two" would pass a run that opened on the status and
+    // never took the shot, which is the failure this is here to catch.
+    const OPENING = ["run_status", "screenshot"]
+
     const client = await openSse(base, `/api/runs/${id}/events?from=1`)
-    await client.readUntil((f) => f.length >= 2)
-    expect(client.frames.map((f) => f.data!.event.type)).toEqual(["run_status", "screenshot"])
+    await client.readUntil((f) => f.length >= OPENING.length)
     // Replay is exhausted, so everything from here can only have come through the fan-out.
     expect(await client.idleFor(200)).toBe(true)
-    // Where replay stopped is a timing question; that the fan-out picks up from exactly there is
-    // not. Pin the boundary to what this client actually saw rather than to a frame count.
-    const replayed = client.frames.length
-    const lastReplayedSeq = client.frames.at(-1)!.data!.seq
+    expect(client.frames.map((f) => f.data!.event.type)).toEqual(OPENING)
+
+    // What *is* a timing question is which of those two arrived by replay and which by fan-out —
+    // and that is invisible from out here, which is the point: the client cannot tell, and neither
+    // may the assertion below. So the boundary is read off what this client holds rather than
+    // written down as 2 and 3. Constants today, because the opening above is fixed; derived so
+    // that adding an opening event means editing OPENING alone, rather than editing OPENING and
+    // then chasing two silent off-by-ones through the rest of the test.
+    const opened = client.frames.length
+    const lastOpeningSeq = client.frames.at(-1)!.data!.seq
 
     gate.finish()
     await client.readUntil((f) => f.some((x) => x.data!.event.type === "done"))
-    const live = client.frames.slice(replayed)
+    const live = client.frames.slice(opened)
     expect(live.map((f) => f.data!.event.type)).toContain("action_result")
-    expect(live[0]!.data!.seq).toBe(lastReplayedSeq + 1)
+    expect(live[0]!.data!.seq).toBe(lastOpeningSeq + 1)
 
     client.close()
     await waitForTerminal(app, id)

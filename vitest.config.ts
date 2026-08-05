@@ -9,8 +9,14 @@ export default defineConfig({
     // the timing-sensitive assertions fail on a busy machine while passing alone, which reads
     // as a broken suite rather than a loaded one. The whole run still finishes in about a minute.
     fileParallelism: false,
-    // And one retry on top of that. A real failure still fails twice — this only absorbs the
-    // case where a browser-driven test loses a race to whatever else the machine is doing.
-    retry: 1,
+    // That is the actual fix, and it is enough on a machine one person is using. A retry on top of
+    // it buys a green run at the price of the signal: the two newest features here are themselves
+    // retry loops — the launch that is asked for twice, the page re-read after it moves — so a
+    // global retry hides genuine nondeterminism in exactly the code most likely to have it, and
+    // hides it by passing. Kept only where nobody is watching the run and the cores are shared.
+    //
+    // A test that passes on the retry is a bug to file, not a run to accept: it is either a race
+    // in the code under test or a race in the test, and both are worth the ten minutes.
+    retry: process.env.CI ? 1 : 0,
   },
 })
