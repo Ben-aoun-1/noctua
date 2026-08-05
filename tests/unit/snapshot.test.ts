@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest"
 import sharp from "sharp"
 import { createBrowserPage } from "../../src/browser/session.js"
-import { capture, snapshotText } from "../../src/browser/snapshot.js"
+import { capture, retryOnNavigation, snapshotText } from "../../src/browser/snapshot.js"
 import { serveFixtures } from "../fixtures/serve.js"
 
 // Chromium launch is the slow part, so one browser and one server serve every case.
@@ -178,5 +178,76 @@ describe("snapshot", () => {
     expect(after.url).toContain("q=Glowbar")
     expect(await bp.page.textContent("body")).toContain("Glowbar Ltd")
     expect(after.elements.length).toBeGreaterThan(0)
+  })
+})
+
+/**
+ * A live run died here: the model opened a news page that redirected itself, the DOM walk threw
+ * `Execution context was destroyed` from inside the loop's outer try, and the run ended as
+ * failed over a page that had merely moved.
+ *
+ * The window where a document is torn down mid-evaluate is real but far too narrow to hit on
+ * purpose, so the retry is tested directly rather than by racing a browser and hoping.
+ */
+describe("reading a page that navigates while it is being read", () => {
+  const settled = async () => {}
+  const destroyed = () => new Error("Execution context was destroyed, most likely because of a navigation")
+
+  it("reads again after the page moves, and returns the second reading", async () => {
+    let attempts = 0
+    const read = async () => {
+      attempts++
+      if (attempts === 1) throw destroyed()
+      return "the document it landed on"
+    }
+    expect(await retryOnNavigation(read, settled)).toBe("the document it landed on")
+    expect(attempts).toBe(2)
+  })
+
+  it("survives a redirect chain, within its budget", async () => {
+    let attempts = 0
+    const read = async () => {
+      attempts++
+      if (attempts <= 2) throw destroyed()
+      return "settled at last"
+    }
+    expect(await retryOnNavigation(read, settled)).toBe("settled at last")
+    expect(attempts).toBe(3)
+  })
+
+  it("gives up rather than spinning when the page never settles", async () => {
+    let attempts = 0
+    const read = async () => {
+      attempts++
+      throw destroyed()
+    }
+    await expect(retryOnNavigation(read, settled)).rejects.toThrow(/Execution context was destroyed/)
+    expect(attempts).toBe(3)
+  })
+
+  it("does not retry a failure that is not the page moving", async () => {
+    let attempts = 0
+    const read = async () => {
+      attempts++
+      throw new Error("selector resolved to no element")
+    }
+    await expect(retryOnNavigation(read, settled)).rejects.toThrow(/no element/)
+    // A real error must surface on the first try: retrying it would only delay the report.
+    expect(attempts).toBe(1)
+  })
+
+  it("settles between attempts rather than reading straight back", async () => {
+    const order: string[] = []
+    let attempts = 0
+    const read = async () => {
+      attempts++
+      order.push(`read ${attempts}`)
+      if (attempts === 1) throw destroyed()
+      return "ok"
+    }
+    await retryOnNavigation(read, async () => {
+      order.push("settle")
+    })
+    expect(order).toEqual(["read 1", "settle", "read 2"])
   })
 })

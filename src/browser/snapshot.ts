@@ -23,6 +23,10 @@ const MAX_ELEMENTS = 120
 const MAX_NAME = 80
 const SCREENSHOT_WIDTH = 1024
 const JPEG_QUALITY = 70
+/** Re-reads allowed when the page navigates out from under the walk. Two covers a redirect chain. */
+const NAVIGATION_RETRIES = 2
+const NAVIGATION_SETTLE_MS = 300
+const RESETTLE_TIMEOUT_MS = 5_000
 
 /**
  * Reads the page the way the model sees it: a numbered list of interactive elements plus a
@@ -36,10 +40,7 @@ const JPEG_QUALITY = 70
  * so the model never spends a step on an action that would time out.
  */
 export async function capture(page: Page): Promise<Snapshot> {
-  const { elements, truncated } = await page.evaluate(collectElements, {
-    maxElements: MAX_ELEMENTS,
-    maxName: MAX_NAME,
-  })
+  const { elements, truncated } = await readElements(page)
 
   const raw = await page.screenshot({ type: "jpeg", quality: JPEG_QUALITY })
   const screenshotJpeg = await sharp(raw)
@@ -48,6 +49,62 @@ export async function capture(page: Page): Promise<Snapshot> {
     .toBuffer()
 
   return { url: page.url(), title: await page.title(), elements, truncated, screenshotJpeg }
+}
+
+/**
+ * A page that navigates while it is being read destroys the context the walk is running in, and
+ * Playwright surfaces that as a thrown error rather than a partial answer. It is not a broken
+ * page — a client-side redirect, a route change, a meta refresh — and it is common enough on
+ * live sites that letting it through would end the run over a page that merely moved.
+ *
+ * So: read again once the new document exists. The bounded wait is what makes this a retry
+ * rather than a spin — if the page is genuinely unreadable, the last attempt throws as before.
+ */
+async function readElements(page: Page): Promise<{ elements: ElementRef[]; truncated: boolean }> {
+  return retryOnNavigation(
+    () => page.evaluate(collectElements, { maxElements: MAX_ELEMENTS, maxName: MAX_NAME }),
+    // The swap is in flight at the moment of the throw, so waiting on a load state here can be
+    // answered by the document that is on its way out. Give the new one a moment to become the
+    // current one, then wait for it — otherwise the re-read succeeds against a blank page and
+    // hands the model an empty listing, which is worse than the error it replaced.
+    async () => {
+      await page.waitForTimeout(NAVIGATION_SETTLE_MS)
+      await page.waitForLoadState("load", { timeout: RESETTLE_TIMEOUT_MS }).catch(() => undefined)
+    },
+  )
+}
+
+/**
+ * Retries `read` while the failure is the page moving underneath it, settling in between.
+ *
+ * Separated from the page so it can be tested without racing a real browser: the window in which
+ * a document is torn down mid-evaluate is real but too narrow to hit on purpose, and a test that
+ * tries would be the flaky kind that gets deleted later.
+ */
+export async function retryOnNavigation<T>(
+  read: () => Promise<T>,
+  settle: () => Promise<void>,
+  retries = NAVIGATION_RETRIES,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await read()
+    } catch (err) {
+      if (attempt >= retries || !navigatedMidRead(err)) throw err
+      await settle()
+    }
+  }
+}
+
+/** Playwright reports the races that a re-read fixes by message, not by type. */
+function navigatedMidRead(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return (
+    message.includes("Execution context was destroyed") ||
+    message.includes("Cannot find context with specified id") ||
+    message.includes("Target closed") ||
+    message.includes("frame was detached")
+  )
 }
 
 /** The model-facing rendering of a snapshot; the screenshot travels alongside it as an image. */
