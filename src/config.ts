@@ -49,7 +49,9 @@ const text = (v: string | undefined, d: string) => (v && v.trim() !== "" ? v.tri
 export const config = {
   port: num(process.env.PORT, 8080),
   dataDir: process.env.DATA_DIR ?? "./data",
-  accessCode: process.env.ACCESS_CODE ?? "dev-code",
+  // `??` would take `ACCESS_CODE=` — an env-file key someone meant to fill in later — as a
+  // configured secret, and the empty string is a secret anyone can submit.
+  accessCode: text(process.env.ACCESS_CODE, "dev-code"),
   model: text(process.env.NOCTUA_MODEL, "claude-sonnet-5"),
   effort: effortOf(process.env.NOCTUA_EFFORT),
   maxSteps: positive(process.env.NOCTUA_MAX_STEPS, 40),

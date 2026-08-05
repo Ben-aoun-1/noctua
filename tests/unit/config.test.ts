@@ -97,3 +97,20 @@ describe("config — the model and the effort level", () => {
     expect((await loadConfig({ NOCTUA_MODEL: value })).model).toBe("claude-sonnet-5")
   })
 })
+
+/**
+ * The access code is the only thing between a public URL and an agent that spends money on
+ * somebody's behalf, and `??` catches `undefined` alone — so `ACCESS_CODE=` in an env file, which
+ * is exactly what docker compose hands over for a key someone meant to fill in later, made the
+ * shared secret the empty string. `/api/auth` then compares it against an empty submission and
+ * agrees. A blank secret has to be no secret at all, and fall back like every other blank here.
+ */
+describe("config — the access code", () => {
+  it("takes a configured code, trimmed", async () => {
+    expect((await loadConfig({ ACCESS_CODE: " s3cret " })).accessCode).toBe("s3cret")
+  })
+
+  it.each(["", "   "])("falls back to the default on %o rather than accepting nothing", async (value) => {
+    expect((await loadConfig({ ACCESS_CODE: value })).accessCode).toBe("dev-code")
+  })
+})
