@@ -262,7 +262,7 @@ function Row({
  * The row is still *drawn* in first-seen order, so the table reads the way the model wrote it
  * rather than the way this list happens to be ordered.
  */
-function columnsOf(findings: Finding[]): string[] {
+export function columnsOf(findings: Finding[]): string[] {
   const seen: string[] = []
   for (const finding of findings) {
     for (const key of Object.keys(finding.data)) if (!seen.includes(key)) seen.push(key)

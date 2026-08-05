@@ -29,7 +29,7 @@ import { isTerminal, useRunStream } from "../useRunStream.ts"
  * tell the difference between the past and a shorter log.
  */
 
-interface Digest {
+export interface Digest {
   /** Every screenshot by the step it was taken on — the receipt index. */
   shots: Map<number, string>
   /** The last frame to arrive, which is what the live view follows. */
@@ -230,7 +230,7 @@ export default function Cockpit({ id }: { id: string }) {
  * whose first act is a screenshot. So a proposal is outstanding until an action, a frame, or the
  * end of the run happens after it, and any of those three is enough to take the strip down.
  */
-function digest(events: PersistedEvent[]): Digest {
+export function digest(events: PersistedEvent[]): Digest {
   const shots = new Map<number, string>()
   const addressAt = new Map<number, string>()
   const findings: Finding[] = []

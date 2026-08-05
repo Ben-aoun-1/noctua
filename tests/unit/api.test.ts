@@ -389,12 +389,16 @@ describe("api live stream", () => {
     expect(client.frames.map((f) => f.data!.event.type)).toEqual(["run_status", "screenshot"])
     // Replay is exhausted, so everything from here can only have come through the fan-out.
     expect(await client.idleFor(200)).toBe(true)
+    // Where replay stopped is a timing question; that the fan-out picks up from exactly there is
+    // not. Pin the boundary to what this client actually saw rather than to a frame count.
+    const replayed = client.frames.length
+    const lastReplayedSeq = client.frames.at(-1)!.data!.seq
 
     gate.finish()
     await client.readUntil((f) => f.some((x) => x.data!.event.type === "done"))
-    const live = client.frames.slice(2)
+    const live = client.frames.slice(replayed)
     expect(live.map((f) => f.data!.event.type)).toContain("action_result")
-    expect(live[0]!.data!.seq).toBe(3)
+    expect(live[0]!.data!.seq).toBe(lastReplayedSeq + 1)
 
     client.close()
     await waitForTerminal(app, id)

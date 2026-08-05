@@ -129,7 +129,7 @@ There is no per-user identity and no audit trail of *who* approved an action. On
 
 ### Testing
 
-345 tests across 13 files, running in about 40 seconds with no API key, no network and no tokens.
+418 tests across 14 files on the server side, plus 28 on the cockpit's two pure functions — all of it in about 90 seconds with no API key, no network and no tokens.
 
 Two decisions made that possible. First, a **scripted fake LLM** behind the same `LLM` interface as the real client: a run is a list of turns to play back, so the loop's behaviour under a denial, a refusal, a `max_tokens` cut-off, an abandoned approval or an unrecoverable error is a deterministic assertion rather than a hope. Second, a **fixture site** — a small registry, a vendor page, a redirect trap, a deliberately crowded page — served over loopback, so `tests/integration/loop.test.ts` drives the real Playwright, the real tools and the real snapshotter against pages that never change.
 
@@ -163,7 +163,7 @@ npm run build && npm start               # → http://localhost:8080
 
 For development, `npm run dev` runs the server under `tsx --watch` and `npm --prefix web run dev` runs Vite on :5173 with `/api` proxied to :8080 — same-origin in both, so there is one cookie story and no CORS.
 
-Tests: `npx vitest run`. No key needed.
+Tests: `npx vitest run` for the server and the agent loop, `npm --prefix web run test` for the cockpit's two pure functions. No key needed for either.
 
 Every knob is in [`.env.example`](.env.example) with a comment: model, effort, the three per-run budgets, the wait limit, the daily cap, and the concurrency limit.
 

@@ -9,7 +9,7 @@ let fx: Awaited<ReturnType<typeof serveFixtures>>
 let bp: Awaited<ReturnType<typeof createBrowserPage>>
 beforeAll(async () => {
   fx = await serveFixtures()
-  bp = await createBrowserPage()
+  bp = await createBrowserPage({ allowRequest: fx.allowRequest })
 })
 afterAll(async () => {
   await bp.close()

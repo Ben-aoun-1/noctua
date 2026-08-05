@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest"
 import { createBrowserPage } from "../../src/browser/session.js"
 import { capture } from "../../src/browser/snapshot.js"
-import { assertSafeUrl } from "../../src/safety/urlGuard.js"
 import { executeTool, isGuarded, toolDefs, type ToolCtx } from "../../src/agent/tools.js"
 import { serveFixtures } from "../fixtures/serve.js"
 
@@ -13,24 +12,12 @@ let asked: string[]
 
 beforeAll(async () => {
   fx = await serveFixtures()
-  bp = await createBrowserPage()
+  bp = await createBrowserPage({ allowRequest: fx.allowRequest })
 })
 afterAll(async () => {
   await bp.close()
   await fx.close()
 })
-
-/**
- * The fixture server binds 127.0.0.1, which `assertSafeUrl` blocks by design. Tests inject a
- * checker that allows exactly that origin and delegates every other URL to the real guard, so
- * the guard is still the thing being exercised everywhere it matters.
- */
-function allowFixtureOrigin(baseUrl: string): (url: string) => Promise<void> {
-  return async (url: string) => {
-    if (url === baseUrl || url.startsWith(baseUrl + "/")) return
-    await assertSafeUrl(url)
-  }
-}
 
 beforeEach(() => {
   asked = []
@@ -41,7 +28,7 @@ beforeEach(() => {
       asked.push(q)
       return "  yes, that is the right company  "
     },
-    checkUrl: allowFixtureOrigin(fx.baseUrl),
+    checkUrl: fx.checkUrl,
   }
 })
 
@@ -165,7 +152,7 @@ describe("executeTool", () => {
     // Stands in for a link or redirect that lands somewhere the model could not have navigated
     // to directly: the check that matters is the one on the URL the browser actually reached.
     const forbidden = `${fx.baseUrl}/company.html`
-    const allowed = allowFixtureOrigin(fx.baseUrl)
+    const allowed = fx.checkUrl
     ctx.checkUrl = async (url) => {
       if (url.startsWith(forbidden)) throw new Error("blocked: private ip 10.0.0.1")
       await allowed(url)

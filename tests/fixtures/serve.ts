@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { extname, join, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
+import { allowPublicRequest, assertSafeUrl } from "../../src/safety/urlGuard.js"
 
 /** The fixture site lives next to this file so tests stay hermetic and offline. */
 const SITE_ROOT = resolve(fileURLToPath(new URL("./site", import.meta.url)))
@@ -20,6 +21,16 @@ const CONTENT_TYPES: Record<string, string> = {
 export interface FixtureServer {
   /** e.g. `http://127.0.0.1:41235` — no trailing slash, so `baseUrl + "/registry.html"` works. */
   baseUrl: string
+  /**
+   * The navigation policy to hand the loop and the tools as `checkUrl`.
+   *
+   * This site is served from 127.0.0.1, which `assertSafeUrl` refuses by design — so tests allow
+   * exactly this origin and hand every other address straight to the real guard, which therefore
+   * remains the thing under test everywhere it matters.
+   */
+  checkUrl: (url: string) => Promise<void>
+  /** The same bargain for the requests a *page* makes: `createBrowserPage`'s `allowRequest`. */
+  allowRequest: (url: string) => boolean
   close: () => Promise<void>
 }
 
@@ -63,8 +74,14 @@ export async function serveFixtures(): Promise<FixtureServer> {
   const address = server.address()
   if (address === null || typeof address === "string") throw new Error("fixture server has no port")
 
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  const mine = (url: string) => url === baseUrl || url.startsWith(baseUrl + "/")
   return {
-    baseUrl: `http://127.0.0.1:${address.port}`,
+    baseUrl,
+    checkUrl: async (url: string) => {
+      if (!mine(url)) await assertSafeUrl(url)
+    },
+    allowRequest: (url: string) => mine(url) || allowPublicRequest(url),
     close: () =>
       new Promise<void>((ok, fail) => {
         // Playwright holds keep-alive sockets open; without this `close` never resolves.

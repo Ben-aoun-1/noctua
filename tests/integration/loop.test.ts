@@ -16,7 +16,6 @@ import { config } from "../../src/config.js"
 import type { AgentEvent, RunStatus } from "../../src/events/types.js"
 import { TIMED_OUT_ANSWER, type ApprovalDecision } from "../../src/runs/control.js"
 import { RunStore, type Run } from "../../src/runs/store.js"
-import { allowPublicRequest, assertSafeUrl } from "../../src/safety/urlGuard.js"
 import { serveFixtures } from "../fixtures/serve.js"
 
 /**
@@ -42,22 +41,6 @@ beforeEach(() => {
   dataDir = mkdtempSync(join(tmpdir(), "noctua-loop-"))
   store = new RunStore(dataDir)
 })
-
-/**
- * The fixture server binds 127.0.0.1, which `assertSafeUrl` blocks by design. Tests inject a
- * checker that allows exactly that origin and delegates everything else to the real guard.
- */
-function allowFixtureOrigin(baseUrl: string): (url: string) => Promise<void> {
-  return async (url: string) => {
-    if (url === baseUrl || url.startsWith(baseUrl + "/")) return
-    await assertSafeUrl(url)
-  }
-}
-
-/** The same bargain for the requests the page itself makes, against the same loopback origin. */
-function allowFixtureRequest(baseUrl: string): (url: string) => boolean {
-  return (url) => url.startsWith(baseUrl + "/") || allowPublicRequest(url)
-}
 
 /** Records every request the loop makes, so the observations can be asserted on. */
 class SpyLLM implements LLM {
@@ -117,8 +100,8 @@ async function drive(
   setup(run)
   await runAgent(run, spy, {
     saveShot: () => SHOT,
-    checkUrl: allowFixtureOrigin(fx.baseUrl),
-    allowRequest: allowFixtureRequest(fx.baseUrl),
+    checkUrl: fx.checkUrl,
+    allowRequest: fx.allowRequest,
     ...opts,
   })
   const events = run.log.readAll().map((pe) => pe.event)
@@ -502,7 +485,7 @@ describe("the agent loop — when things go wrong", () => {
   it("blanks the tab when a deferred redirect lands somewhere disallowed", async () => {
     const blockOffsite = async (url: string) => {
       if (url.includes("/offsite.html")) throw new Error("blocked: offsite.html")
-      await allowFixtureOrigin(fx.baseUrl)(url)
+      await fx.checkUrl(url)
     }
     const { spy, of } = await drive(
       [
@@ -884,7 +867,7 @@ describe("the agent loop — budgets and bookkeeping", () => {
  */
 describe("the browser page — what a page pulls in", () => {
   it("aborts an embedded private address while the page itself still renders", async () => {
-    const bp = await createBrowserPage({ allowRequest: allowFixtureRequest(fx.baseUrl) })
+    const bp = await createBrowserPage({ allowRequest: fx.allowRequest })
     try {
       const blocked = bp.page.waitForEvent("requestfailed", (req) =>
         req.url().startsWith("http://169.254.169.254/"),
