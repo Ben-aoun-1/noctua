@@ -6,6 +6,10 @@ import { allowPublicRequest, assertSafeUrl, isPrivateIp } from "../../src/safety
 const STUBBED_DNS: Record<string, { address: string; family: number }[]> = {
   "ssrf-metadata.example": [{ address: "169.254.169.254", family: 4 }],
   "ssrf-empty.example": [],
+  // Names that merely *contain* an internal-sounding word, so the suffix rules can be shown not to
+  // over-match without the answer depending on what the real resolver says about a made-up domain.
+  "internal.example": [{ address: "93.184.216.34", family: 4 }],
+  "mylocalhost.example": [{ address: "93.184.216.34", family: 4 }],
 }
 vi.mock("node:dns/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:dns/promises")>()
@@ -45,9 +49,17 @@ describe("urlGuard", () => {
   it("allows a public ipv6 literal", async () =>
     await expect(assertSafeUrl("http://[2606:2800:220:1:248:1893:25c8:1946]/")).resolves.toBeUndefined())
 
-  it.each(["http://metadata.google.internal/", "http://printer.local/"])(
-    "rejects internal host suffix in %s", async (url) =>
-      await expect(assertSafeUrl(url)).rejects.toThrow(/^blocked: host /))
+  it.each([
+    "http://metadata.google.internal/",
+    "http://printer.local/",
+    "http://localhost/",
+    "http://anything.localhost/",
+  ])("rejects internal host suffix in %s", async (url) =>
+    await expect(assertSafeUrl(url)).rejects.toThrow(/^blocked: host /))
+  // The same names both gates refuse, so neither can quietly drift away from the other.
+  it.each(["http://mylocalhost.example/", "http://internal.example/"])(
+    "does not mistake %s for an internal name", async (url) =>
+      await expect(assertSafeUrl(url)).resolves.toBeUndefined())
   it("rejects an unparseable url", async () =>
     await expect(assertSafeUrl("not a url")).rejects.toThrow(/^blocked: invalid URL$/))
 })
@@ -74,6 +86,27 @@ describe("urlGuard — what a page may pull in", () => {
     "data:image/gif;base64,R0lGODlhAQABAAAAACw=",
     "about:blank",
   ])("allows %s", (url) => expect(allowPublicRequest(url)).toBe(true))
+
+  /**
+   * A name can say "inside this deployment" without an IP literal anywhere in it, and this check
+   * reads nothing but the literal address — so the names have to be refused by name. These are the
+   * canonical ones: `metadata.google.internal` is where GCP serves the same credentials that
+   * 169.254.169.254 does, and `localhost` is this app's own API inside its own container.
+   */
+  it.each([
+    "http://metadata.google.internal/computeMetadata/v1/",
+    "http://localhost:8080/api/runs",
+    "https://LOCALHOST/",
+    "http://printer.local/",
+    "http://wiki.internal/",
+    // `.localhost` is reserved to loopback, and chromium resolves every name under it there —
+    // so this is `localhost:8080` again, spelled so that a check on the word alone misses it.
+    "http://anything.localhost:8080/",
+  ])("refuses %s by name", (url) => expect(allowPublicRequest(url)).toBe(false))
+
+  // Named rules are suffixes, not substrings: a real site must not be caught by one.
+  it.each(["https://mylocalhost.com/", "https://internal.example.com/", "https://local.dev/"])(
+    "leaves %s alone", (url) => expect(allowPublicRequest(url)).toBe(true))
 
   // The honest limit of a check that must not resolve DNS. The address the *tab* is on is where
   // that policy is applied, by `assertSafeUrl`, which does resolve.

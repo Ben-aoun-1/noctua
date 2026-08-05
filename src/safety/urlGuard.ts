@@ -26,6 +26,27 @@ function unbracket(host: string): string {
   return host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host
 }
 
+/**
+ * Names that mean "somewhere inside this deployment", whoever is asking.
+ *
+ * Both gates need these, and for the same reason: an address does not have to contain an IP
+ * literal to reach the metadata service. `http://metadata.google.internal/` is the canonical way
+ * to ask GCP for the same credentials 169.254.169.254 serves, and `http://localhost:8080/` is this
+ * app's own API inside its own container. A gate that reads IP literals alone sees neither.
+ *
+ * String comparison only — this is asked of every subresource on every page, so it cannot resolve
+ * anything. Suffixes, not substrings: `mylocalhost.com` is somebody's real site.
+ */
+function isInternalName(host: string): boolean {
+  return (
+    host === "localhost" ||
+    // RFC 6761 reserves the whole of `.localhost` to loopback, and chromium resolves it there.
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal")
+  )
+}
+
 export function isPrivateIp(ip: string): boolean {
   const addr = unbracket(ip)
   const family = isIP(addr)
@@ -43,12 +64,17 @@ export function isPrivateIp(ip: string): boolean {
  * see, because the tab never moves: a page that embeds `http://169.254.169.254/latest/meta-data/`
  * and has the browser photograph cloud credentials into the model's context, the event log and the
  * exports on its behalf.
+ *
+ * Smaller does not mean IP-literals-only, though. The names in {@link isInternalName} reach the
+ * same places without one, and refusing them costs a string comparison.
  */
 export function allowPublicRequest(url: string): boolean {
   let u: URL
   try { u = new URL(url) } catch { return false }
+  const host = unbracket(u.hostname)
+  if (isInternalName(host)) return false
   // Not an IP literal (a hostname, or no host at all as in `data:`) is not this check's business.
-  return !isPrivateIp(u.hostname)
+  return !isPrivateIp(host)
 }
 
 export async function assertSafeUrl(url: string): Promise<void> {
@@ -56,7 +82,7 @@ export async function assertSafeUrl(url: string): Promise<void> {
   try { u = new URL(url) } catch { throw new Error(`blocked: invalid URL`) }
   if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error(`blocked: protocol ${u.protocol}`)
   const host = unbracket(u.hostname)
-  if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) throw new Error(`blocked: host ${host}`)
+  if (isInternalName(host)) throw new Error(`blocked: host ${host}`)
   if (isIP(host)) { if (isPrivateIp(host)) throw new Error(`blocked: private ip ${host}`); return }
   const addrs = await lookup(host, { all: true }).catch(() => { throw new Error(`blocked: cannot resolve ${host}`) })
   if (addrs.length === 0) throw new Error(`blocked: cannot resolve ${host}`)
