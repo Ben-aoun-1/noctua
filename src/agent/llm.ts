@@ -134,7 +134,7 @@ export class AnthropicLLM implements LLM {
         max_tokens: MAX_TOKENS,
         system: [{ type: "text", text: req.system, cache_control: { type: "ephemeral" } }],
         thinking: { type: "adaptive", display: "summarized" },
-        output_config: { effort: config.effort as Anthropic.OutputConfig["effort"] },
+        output_config: { effort: config.effort },
         tools: req.tools,
         tool_choice: { type: "auto", disable_parallel_tool_use: true },
         messages: req.messages,
