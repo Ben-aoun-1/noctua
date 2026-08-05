@@ -881,4 +881,45 @@ describe("the browser page — what a page pulls in", () => {
       await bp.close()
     }
   })
+
+  /**
+   * The address in the markup is not the address the browser ends up fetching. A permitted URL
+   * that answers `302 Location: http://169.254.169.254/…` gets the metadata fetched anyway, because
+   * the chain after the first hop is followed by the network stack — where a gate installed on the
+   * request has, by design, no say. So the chain is walked here instead, one gated hop at a time.
+   */
+  it("aborts a subresource that redirects to a private address, and follows one that does not", async () => {
+    const bp = await createBrowserPage({ allowRequest: fx.allowRequest })
+    try {
+      const METADATA = "http://169.254.169.254/"
+      const asked: string[] = []
+      bp.page.on("request", (req) => asked.push(req.url()))
+
+      // Whichever of these two comes first is the answer: the hop was refused before it left, or
+      // it left. Racing them rather than waiting on the refusal alone is what keeps the *failing*
+      // case a failed assertion naming the address that was reached, instead of a thirty-second
+      // wait on an address that — here, but not on a cloud host — happens never to answer.
+      const hop = Promise.race([
+        bp.page.waitForRequest((req) => req.url().startsWith(METADATA))
+          .then((req) => `reached ${req.url()}`),
+        bp.page.waitForEvent("requestfailed", (req) => req.url().includes("/bounce?to=http"))
+          .then((req) => req.failure()?.errorText ?? "failed, for no stated reason"),
+      ])
+      // Images do not hold up DOMContentLoaded, so this returns whether the hop is refused or is
+      // left hanging against an address nothing answers on.
+      await bp.page.goto(`${fx.baseUrl}/bounced.html`, { waitUntil: "domcontentloaded" })
+
+      expect(await hop).toContain("BLOCKED")
+      // The point of the fix: the private address is never asked for at all, rather than asked for
+      // and then found to have been a bad idea.
+      expect(asked.filter((url) => url.startsWith(METADATA))).toEqual([])
+
+      // ...and a redirect to an address the policy allows still delivers its document, so this is
+      // a gate on the chain rather than a refusal to follow one.
+      expect(await bp.page.frameLocator("iframe").locator("h1").textContent()).toBe("Glowbar")
+      expect(await bp.page.textContent("h1")).toBe("Bounced resources")
+    } finally {
+      await bp.close()
+    }
+  })
 })

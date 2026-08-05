@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Fixture Bounced Resources</title>
+    <style>
+      body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem; color: #111; }
+      iframe { border: 1px solid #999; }
+    </style>
+  </head>
+  <body>
+    <h1>Bounced resources</h1>
+    <p>Both addresses below are on this origin, and both are allowed by any check that reads them.</p>
+
+    <!-- The SSRF that survives a gate applied to the address in the markup: this image is fetched
+         from a permitted URL that answers "go here instead", and the browser follows that hop on
+         its own. Whatever comes back is rendered, photographed and carried into the model's
+         context, the event log and the exported report. -->
+    <img src="/bounce?to=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data%2F" width="16" height="16" alt="metadata" />
+
+    <!-- The same mechanism used for something ordinary, which must keep working. -->
+    <iframe src="/bounce?to=/vendor.html" width="320" height="120"></iframe>
+  </body>
+</html>

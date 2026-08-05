@@ -1,4 +1,4 @@
-import { chromium, type Browser, type Page } from "playwright"
+import { chromium, type Browser, type Page, type Request, type Route } from "playwright"
 import { allowPublicRequest } from "../safety/urlGuard.js"
 
 export interface BrowserPage {
@@ -21,6 +21,28 @@ export interface BrowserPageOpts {
 
 /** Wide enough for desktop layouts, short enough that a screenshot stays cheap. */
 const VIEWPORT = { width: 1280, height: 900 }
+
+/**
+ * Hops one subresource may take before it is refused outright.
+ *
+ * Chromium allows twenty; ten is past anything a real site does and well short of a chain that
+ * exists only to exhaust something. A loop between two addresses is refused rather than followed
+ * until a timeout, which is what a chain nobody meant to build looks like from here.
+ */
+const MAX_REDIRECTS = 10
+
+/**
+ * Headers that must not survive a hop to another origin.
+ *
+ * Walking the chain by hand means re-sending the first request's headers, and those carry whatever
+ * the browser attached for the address in the *markup*. Chromium would consult its cookie jar
+ * again for wherever the hop actually leads; copying them across instead would hand the session
+ * cookie of a site the agent is signed into to anyone who can find an open redirect on it —
+ * `<img src="https://signed-in.example/r?to=attacker">` and the cookie arrives at the attacker.
+ * Dropping them is what makes the jar fill them back in, for the origin being asked rather than
+ * the one that pointed here.
+ */
+const CREDENTIAL_HEADERS = ["cookie", "authorization", "proxy-authorization"]
 
 /**
  * How many times to ask chromium to start.
@@ -53,10 +75,7 @@ export async function createBrowserPage(opts: BrowserPageOpts = {}): Promise<Bro
   const allowRequest = opts.allowRequest ?? allowPublicRequest
   const browser = await launch()
   const context = await browser.newContext({ viewport: VIEWPORT })
-  await context.route("**/*", async (route) => {
-    if (allowRequest(route.request().url())) await route.continue()
-    else await route.abort("blockedbyclient")
-  })
+  await context.route("**/*", (route) => guardRequest(route, allowRequest))
   // tsx/esbuild compiles with `keepNames`, which rewrites every named function into a
   // `__name(fn, "fn")` call and defines that helper at the top of the *module*. `page.evaluate`
   // ships only the function's own source to the browser, so the helper is left behind and the
@@ -75,6 +94,117 @@ export async function createBrowserPage(opts: BrowserPageOpts = {}): Promise<Bro
       await browser.close()
     },
   }
+}
+
+/**
+ * Applies the policy to one request — and to every address that request is redirected to.
+ *
+ * A gate on the address in the markup is not a gate on the address that gets fetched. Playwright
+ * hands the handler the *first* URL of a redirect chain and nothing after it (documented on
+ * `BrowserContext.route`), so `<img src="/bounce">` answering `302 Location:
+ * http://169.254.169.254/latest/meta-data/` had the metadata fetched, rendered, photographed and
+ * carried into the model's context, the event log and the exported report — with the check that
+ * exists to stop exactly that never seeing the address at all.
+ *
+ * So the chain is not delegated to chromium: each response is taken with redirects switched off,
+ * every `Location` is resolved and put back through the policy, and only a body that nothing
+ * redirected to is handed over. The tab's own address is the one exception — see below.
+ */
+async function guardRequest(route: Route, allowRequest: (url: string) => boolean): Promise<void> {
+  try {
+    const request = route.request()
+    const start = request.url()
+    if (!allowRequest(start)) return await settle(() => route.abort("blockedbyclient"))
+    // A document fulfilled here would be a document served at the address it was *asked* for
+    // rather than the one it came from, and everything downstream reads that address: relative
+    // links and images resolve against it, and the loop re-checks it — with DNS, which is the
+    // stronger of the two policies — before anything is allowed to read the page. Following the
+    // tab's own chain by hand would quietly cost all of that, so it is left to chromium, whose
+    // landing the loop then judges. Every other request is fetched here, where its hops are seen.
+    if (isTabNavigation(request)) return await settle(() => route.continue())
+    // A scheme the browser answers without the network — `data:`, `blob:` — has no chain to walk
+    // and nothing to re-check, so it goes on as it did before rather than through a fetch that
+    // would only find new ways to fail.
+    if (!isWeb(start)) return await settle(() => route.continue())
+
+    const origin = new URL(start).origin
+    let url = start
+    let method = request.method()
+    let body: string | undefined
+    let headers: Record<string, string> | undefined
+    for (let hop = 0; ; hop++) {
+      const response = await route.fetch({ url, method, postData: body, headers, maxRedirects: 0 })
+      const location = response.headers()["location"]
+      const redirected = response.status() >= 300 && response.status() < 400
+      if (!redirected || location === undefined) {
+        return await settle(() => route.fulfill({ response }))
+      }
+      if (hop >= MAX_REDIRECTS) return await settle(() => route.abort("failed"))
+      // Relative as often as not — `Location: /latest/meta-data/` is a hop like any other.
+      const next = new URL(location, url).toString()
+      if (!allowRequest(next) || !isWeb(next)) {
+        return await settle(() => route.abort("blockedbyclient"))
+      }
+      // Browsers re-issue these as a bodyless GET. A chain followed by hand has to do the same, or
+      // a form post that redirects is submitted a second time, to the page it redirected to.
+      if (response.status() === 303 || (response.status() < 303 && method === "POST")) {
+        method = "GET"
+        body = ""
+      }
+      // Credentials belong to the address that was asked for, not to wherever it points.
+      headers = new URL(next).origin === origin ? undefined : await unauthenticated(request)
+      url = next
+    }
+  } catch {
+    // Whatever the reason — the address refused the connection, a `Location` that is not a URL, a
+    // policy that threw — the request does not go out. This is the same failure the page would
+    // have seen from a network that dropped it, which is a page that renders without it.
+    await settle(() => route.abort("failed"))
+  }
+}
+
+/** Only http(s) has a redirect chain, and only http(s) reaches an address at all. */
+function isWeb(url: string): boolean {
+  const protocol = new URL(url).protocol
+  return protocol === "http:" || protocol === "https:"
+}
+
+/**
+ * This request's headers with the caller's credentials taken out, so Playwright fills in whatever
+ * the cookie jar holds for the origin actually being asked. See {@link CREDENTIAL_HEADERS}.
+ */
+async function unauthenticated(request: Request): Promise<Record<string, string>> {
+  const headers = { ...(await request.allHeaders()) }
+  for (const name of CREDENTIAL_HEADERS) delete headers[name]
+  return headers
+}
+
+/**
+ * Whether this request is the tab moving, rather than something the page is pulling in.
+ *
+ * A frame is not always available — a service worker's request belongs to no frame, and Playwright
+ * throws rather than saying so. That is not the tab's address either, so it takes the gated path:
+ * the answer this cannot establish is the one that costs least to be wrong about.
+ */
+function isTabNavigation(request: Request): boolean {
+  if (!request.isNavigationRequest()) return false
+  try {
+    return request.frame().parentFrame() === null
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Settles a route without letting the settlement itself throw.
+ *
+ * Playwright invokes this handler itself, so a rejection here escapes into its own machinery
+ * rather than into the loop's try — which is how `runAgent` never throwing would be routed around.
+ * And a route whose page has already gone rejects on every one of these calls, which is a race
+ * with a closing run rather than anything to report.
+ */
+async function settle(act: () => Promise<void>): Promise<void> {
+  await act().catch(() => undefined)
 }
 
 /** Chromium, with one more attempt for the launch that fails over nothing. */

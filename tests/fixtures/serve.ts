@@ -41,11 +41,25 @@ export interface FixtureServer {
 export async function serveFixtures(): Promise<FixtureServer> {
   const server = createServer((req, res) => {
     void (async () => {
+      let asked: URL
       let pathname: string
       try {
-        pathname = decodeURIComponent(new URL(req.url ?? "/", "http://127.0.0.1").pathname)
+        asked = new URL(req.url ?? "/", "http://127.0.0.1")
+        pathname = decodeURIComponent(asked.pathname)
       } catch {
         res.writeHead(400, { "content-type": "text/plain; charset=utf-8" }).end("bad request")
+        return
+      }
+      // The hop a page can take without saying so in its markup: `/bounce?to=<url>` answers a 302
+      // to whatever it is handed. That is how a fixture reaches an address the request guard was
+      // never shown — the redirect chain is the part of a request the browser follows on its own.
+      if (pathname === "/bounce") {
+        const to = asked.searchParams.get("to")
+        if (to === null) {
+          res.writeHead(400, { "content-type": "text/plain; charset=utf-8" }).end("bounce needs ?to=")
+          return
+        }
+        res.writeHead(302, { location: to }).end()
         return
       }
       const file = resolve(join(SITE_ROOT, pathname === "/" ? "/index.html" : pathname))
