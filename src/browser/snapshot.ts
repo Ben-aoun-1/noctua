@@ -112,8 +112,25 @@ function navigatedMidRead(err: unknown): boolean {
     message.includes("Execution context was destroyed") ||
     message.includes("Cannot find context with specified id") ||
     message.includes("Target closed") ||
-    message.includes("frame was detached")
+    message.includes("frame was detached") ||
+    capturerWasBusy(err)
   )
+}
+
+/**
+ * The compositor declining to produce a frame, which it does under load.
+ *
+ * Observed killing runs on their *first* capture — before a model turn, on a page that was
+ * perfectly readable a moment later. Nothing about the page is wrong, so ending the run over it
+ * is the same mistake as ending it over a redirect: the reading is retried, and if the browser
+ * still cannot draw after the settle, the error surfaces exactly as before.
+ *
+ * Deliberately narrow. A protocol error naming any other method is a real failure and is left
+ * alone — this matches the one call whose failure is known to be worth asking twice.
+ */
+function capturerWasBusy(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return message.includes("Unable to capture screenshot")
 }
 
 /** The model-facing rendering of a snapshot; the screenshot travels alongside it as an image. */

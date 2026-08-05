@@ -297,6 +297,32 @@ describe("reading a page that navigates while it is being read", () => {
     expect(attempts).toBe(3)
   })
 
+  it("reads again when the browser could not draw the frame", async () => {
+    // Seen ending runs on their first capture under load, on a page that read fine a moment later.
+    let attempts = 0
+    const read = async () => {
+      attempts++
+      if (attempts === 1) {
+        throw new Error(
+          "page.screenshot: Protocol error (Page.captureScreenshot): Unable to capture screenshot",
+        )
+      }
+      return "drawn on the second ask"
+    }
+    expect(await retryOnNavigation(read, settled)).toBe("drawn on the second ask")
+    expect(attempts).toBe(2)
+  })
+
+  it("leaves other protocol errors alone", async () => {
+    let attempts = 0
+    const read = async () => {
+      attempts++
+      throw new Error("page.click: Protocol error (Input.dispatchMouseEvent): Target crashed")
+    }
+    await expect(retryOnNavigation(read, settled)).rejects.toThrow(/dispatchMouseEvent/)
+    expect(attempts).toBe(1)
+  })
+
   it("does not retry a failure that is not the page moving", async () => {
     let attempts = 0
     const read = async () => {
