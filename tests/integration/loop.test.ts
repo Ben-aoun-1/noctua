@@ -234,9 +234,30 @@ describe("the agent loop — happy path", () => {
       { toolName: "finish", toolInput: { outcome: "success", summary: "done" } },
     ])
     expect(of("screenshot")).toEqual([
-      { type: "screenshot", url: SHOT, step: 1 },
-      { type: "screenshot", url: SHOT, step: 2 },
+      { type: "screenshot", url: SHOT, step: 1, pageUrl: "about:blank" },
+      { type: "screenshot", url: SHOT, step: 2, pageUrl: "about:blank" },
     ])
+  })
+
+  /**
+   * The frame carries the address it was taken on, because the cockpit shows the two together and
+   * nothing else in the log states one. Read back out of `navigate`'s prose instead — which is what
+   * the UI had to do — a click-through leaves the *previous* address under the live view for the
+   * rest of the run, on the very demo this project is judged by.
+   */
+  it("stamps every screenshot with the address the tab was actually on", async () => {
+    const url = `${fx.baseUrl}/registry.html`
+    const { of } = await drive([
+      { toolName: "navigate", toolInput: { url } },
+      // A click, whose landing page no tool summary ever names.
+      { toolName: "click", toolInput: { ref: 1, why: "open the first result" } },
+      { toolName: "finish", toolInput: { outcome: "success", summary: "done" } },
+    ])
+    const seen = of("screenshot").map((e) => e.pageUrl)
+    expect(seen[0]).toBe("about:blank")
+    expect(seen[1]).toBe(url)
+    expect(seen[2]).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/\S+/)
+    expect(seen[2]).not.toBe(url)
   })
 
   it("saves each step's shot under the run directory by default", async () => {
@@ -252,6 +273,7 @@ describe("the agent loop — happy path", () => {
       type: "screenshot",
       url: `/api/runs/${run.id}/shots/1.jpg`,
       step: 1,
+      pageUrl: "about:blank",
     })
   })
 })

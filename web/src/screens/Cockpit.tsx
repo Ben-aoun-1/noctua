@@ -34,7 +34,7 @@ interface Digest {
   shots: Map<number, string>
   /** The last frame to arrive, which is what the live view follows. */
   latestShot: { step: number; url: string } | null
-  /** The last page address the log actually named, by step. */
+  /** Where the page was at each step: the frame's own address, or the last one the log named. */
   addressAt: Map<number, string>
   findings: Finding[]
   budget: { steps: number; maxSteps: number; costUsd: number; maxCostUsd: number } | null
@@ -46,13 +46,14 @@ interface Digest {
 }
 
 /**
- * The resolved address, out of the only two sentences that ever contain one.
+ * The address a step was on, for a log written before the frame carried its own.
  *
- * No event carries the page's URL — the screenshot event's `url` is the image's own address — so
- * this reads it back out of the summaries `navigate` and `go_back` write, which are produced by
- * this repository (`src/agent/tools.ts`) and are the only place a real address is stated. A click
- * that moves the page leaves the last address standing, which is why the line under the live view
- * is labelled as the last address seen rather than as "the current URL".
+ * A `screenshot` event now states the page's URL (`pageUrl`) alongside the image's, and that is
+ * what this prefers. Older runs have to replay too, and all they ever said out loud is the
+ * summaries `navigate` and `go_back` write — produced by this repository (`src/agent/tools.ts`).
+ * That reading lags: a click that moves the page states no address at all, so the last one a
+ * navigate mentioned stands for the rest of the run, which is why the line under the live view is
+ * labelled as the last address seen rather than as "the current URL".
  */
 const ADDRESS_SAID = /(?:navigated to|went back to|still at) (\S+)/
 
@@ -243,6 +244,9 @@ function digest(events: PersistedEvent[]): Digest {
   for (const { event } of events) {
     switch (event.type) {
       case "screenshot":
+        // The frame's own account of where it was taken wins over anything inferred from prose,
+        // and stands as the last known address for the steps after it.
+        if (event.pageUrl !== undefined && event.pageUrl !== "") address = event.pageUrl
         shots.set(event.step, event.url)
         addressAt.set(event.step, address)
         latestShot = { step: event.step, url: event.url }

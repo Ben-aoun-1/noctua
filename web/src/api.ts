@@ -49,7 +49,9 @@ export type AgentEvent =
   | { type: "action_proposed"; tool: string; args: Record<string, unknown>; guarded: boolean }
   | { type: "action_started"; tool: string; args: Record<string, unknown> }
   | { type: "action_result"; tool: string; ok: boolean; summary: string }
-  | { type: "screenshot"; url: string; step: number }
+  // `url` is the image's own address; `pageUrl` is the address of the page in it, and is absent
+  // from every log written before the loop started stamping it.
+  | { type: "screenshot"; url: string; step: number; pageUrl?: string }
   | { type: "finding"; data: Record<string, unknown>; step: number }
   | { type: "ask_human"; question: string }
   | { type: "human_answer"; text: string }

@@ -18,7 +18,7 @@ export interface EyesPaneProps {
   url: string | null
   /** The step that screenshot belongs to, shown as the ghost numeral. */
   step: number | null
-  /** Where the browser was at that step; blank until the agent has navigated anywhere. */
+  /** Where the browser was at that step; blank when the log for it never named an address. */
   pageUrl: string
   /** Whether the run could still produce a first frame — the difference between waiting and empty. */
   waiting: boolean

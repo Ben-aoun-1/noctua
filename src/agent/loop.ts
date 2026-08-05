@@ -213,7 +213,15 @@ export async function runAgent(run: Run, llm: LLM, opts: LoopOpts = {}): Promise
 
       const blanked = await blankIfUnsafe(page, checkUrl, emit)
       const snap = await capture(page)
-      emit({ type: "screenshot", url: saveShot(snap.screenshotJpeg, steps), step: steps })
+      emit({
+        type: "screenshot",
+        url: saveShot(snap.screenshotJpeg, steps),
+        step: steps,
+        // The frame and the address it was taken on travel together, because nothing else in the
+        // log states one: a click that moves the page names no URL anywhere, so a UI reading the
+        // address out of tool prose shows the last one a *navigate* mentioned for ever after.
+        pageUrl: snap.url,
+      })
 
       // "Same page, nothing new to show for it" is what being stuck looks like from out here.
       if (snap.url === lastUrl && findings.length === lastFindingCount) stuckTurns++
