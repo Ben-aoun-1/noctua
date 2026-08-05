@@ -40,29 +40,8 @@ const RESETTLE_TIMEOUT_MS = 5_000
  * so the model never spends a step on an action that would time out.
  */
 export async function capture(page: Page): Promise<Snapshot> {
-  const { elements, truncated } = await readElements(page)
-
-  const raw = await page.screenshot({ type: "jpeg", quality: JPEG_QUALITY })
-  const screenshotJpeg = await sharp(raw)
-    .resize({ width: SCREENSHOT_WIDTH, withoutEnlargement: true })
-    .jpeg({ quality: JPEG_QUALITY })
-    .toBuffer()
-
-  return { url: page.url(), title: await page.title(), elements, truncated, screenshotJpeg }
-}
-
-/**
- * A page that navigates while it is being read destroys the context the walk is running in, and
- * Playwright surfaces that as a thrown error rather than a partial answer. It is not a broken
- * page — a client-side redirect, a route change, a meta refresh — and it is common enough on
- * live sites that letting it through would end the run over a page that merely moved.
- *
- * So: read again once the new document exists. The bounded wait is what makes this a retry
- * rather than a spin — if the page is genuinely unreadable, the last attempt throws as before.
- */
-async function readElements(page: Page): Promise<{ elements: ElementRef[]; truncated: boolean }> {
   return retryOnNavigation(
-    () => page.evaluate(collectElements, { maxElements: MAX_ELEMENTS, maxName: MAX_NAME }),
+    () => readWholePage(page),
     // The swap is in flight at the moment of the throw, so waiting on a load state here can be
     // answered by the document that is on its way out. Give the new one a moment to become the
     // current one, then wait for it — otherwise the re-read succeeds against a blank page and
@@ -72,6 +51,36 @@ async function readElements(page: Page): Promise<{ elements: ElementRef[]; trunc
       await page.waitForLoadState("load", { timeout: RESETTLE_TIMEOUT_MS }).catch(() => undefined)
     },
   )
+}
+
+/**
+ * One reading of one document: the walk, the frame, the address and the title.
+ *
+ * A page that navigates while it is being read destroys the context the walk is running in, and
+ * Playwright surfaces that as a thrown error rather than a partial answer. It is not a broken
+ * page — a client-side redirect, a route change, a meta refresh — and it is common enough on live
+ * sites that letting it through would end the run over a page that merely moved.
+ *
+ * All four calls are inside the retry, not just the walk: `page.title()` evaluates against the
+ * main frame too, so a redirect landing between the walk and the title throws the same error from
+ * three lines lower. And they belong together for a second reason — retrying the title alone would
+ * pair a title from the new document with a listing and a screenshot from the old one, and the
+ * refs in that listing address elements that no longer exist. So the whole reading is redone, or
+ * none of it is.
+ */
+async function readWholePage(page: Page): Promise<Snapshot> {
+  const { elements, truncated } = await page.evaluate(collectElements, {
+    maxElements: MAX_ELEMENTS,
+    maxName: MAX_NAME,
+  })
+
+  const raw = await page.screenshot({ type: "jpeg", quality: JPEG_QUALITY })
+  const screenshotJpeg = await sharp(raw)
+    .resize({ width: SCREENSHOT_WIDTH, withoutEnlargement: true })
+    .jpeg({ quality: JPEG_QUALITY })
+    .toBuffer()
+
+  return { url: page.url(), title: await page.title(), elements, truncated, screenshotJpeg }
 }
 
 /**

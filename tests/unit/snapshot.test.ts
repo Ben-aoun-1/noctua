@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest"
 import sharp from "sharp"
+import type { Page } from "playwright"
 import { createBrowserPage } from "../../src/browser/session.js"
 import { capture, retryOnNavigation, snapshotText } from "../../src/browser/snapshot.js"
 import { serveFixtures } from "../fixtures/serve.js"
@@ -182,6 +183,77 @@ describe("snapshot", () => {
 })
 
 /**
+ * The retry was installed on the DOM walk and on nothing else, while `capture` goes on to call
+ * `page.screenshot()` and `page.title()` — and `title` evaluates against the main frame, so a
+ * redirect landing a few lines later throws the identical error from the identical place and ends
+ * the run just the same. A page is read as one document or not at all.
+ *
+ * The window is far too narrow to hit on purpose, so the page is a stand-in rather than a browser.
+ */
+describe("capture — when the page moves after the walk", () => {
+  const destroyed = () =>
+    new Error("Execution context was destroyed, most likely because of a navigation")
+
+  /** Just enough Page for `capture`: the walk, the frame, the address, the title and the settle. */
+  function fakePage(throwOn: "screenshot" | "title", shot: Buffer) {
+    const calls: string[] = []
+    let thrown = false
+    const moved = (step: "screenshot" | "title") => {
+      if (step !== throwOn || thrown) return
+      thrown = true
+      throw destroyed()
+    }
+    const page = {
+      evaluate: async () => {
+        calls.push("walk")
+        return { elements: [{ ref: 1, role: "link", name: "Home" }], truncated: false }
+      },
+      screenshot: async () => {
+        calls.push("screenshot")
+        moved("screenshot")
+        return shot
+      },
+      url: () => "https://example.com/landed",
+      title: async () => {
+        calls.push("title")
+        moved("title")
+        return "Landed"
+      },
+      waitForTimeout: async () => {
+        calls.push("settle")
+      },
+      waitForLoadState: async () => undefined,
+    }
+    return { page: page as unknown as Page, calls }
+  }
+
+  const shot = async () =>
+    await sharp({ create: { width: 20, height: 20, channels: 3, background: "#ffffff" } })
+      .jpeg()
+      .toBuffer()
+
+  it("re-reads walk, frame and title as one unit when the title is what throws", async () => {
+    const { page, calls } = fakePage("title", await shot())
+    const snap = await capture(page)
+    expect(snap.title).toBe("Landed")
+    expect(snap.elements).toHaveLength(1)
+    // Not just the title: the listing that ships beside it is re-read from the same document.
+    expect(calls).toEqual([
+      "walk", "screenshot", "title",
+      "settle",
+      "walk", "screenshot", "title",
+    ])
+  })
+
+  it("re-reads the same unit when the screenshot is what throws", async () => {
+    const { page, calls } = fakePage("screenshot", await shot())
+    const snap = await capture(page)
+    expect(snap.title).toBe("Landed")
+    expect(calls).toEqual(["walk", "screenshot", "settle", "walk", "screenshot", "title"])
+  })
+})
+
+/**
  * A live run died here: the model opened a news page that redirected itself, the DOM walk threw
  * `Execution context was destroyed` from inside the loop's outer try, and the run ended as
  * failed over a page that had merely moved.
@@ -234,6 +306,28 @@ describe("reading a page that navigates while it is being read", () => {
     await expect(retryOnNavigation(read, settled)).rejects.toThrow(/no element/)
     // A real error must surface on the first try: retrying it would only delay the report.
     expect(attempts).toBe(1)
+  })
+
+  /**
+   * The walk was guarded and the two calls after it were not, so a redirect landing three lines
+   * later — `page.screenshot()`, or `page.title()`, which evaluates against the main frame — threw
+   * the identical error out of the identical place and ended the run anyway. `capture` now retries
+   * as one unit, which is also the only correct shape: a title re-read on its own would be paired
+   * with an element listing from the document that has already gone.
+   */
+  it("re-reads the walk, the frame and the title together when the title is what throws", async () => {
+    const steps: string[] = []
+    let attempts = 0
+    const read = async () => {
+      attempts++
+      steps.push("walk", "screenshot")
+      // The walk got through; the page moved before the title was asked for.
+      if (attempts === 1) throw destroyed()
+      steps.push("title")
+      return "one document, read whole"
+    }
+    expect(await retryOnNavigation(read, settled)).toBe("one document, read whole")
+    expect(steps).toEqual(["walk", "screenshot", "walk", "screenshot", "title"])
   })
 
   it("settles between attempts rather than reading straight back", async () => {
